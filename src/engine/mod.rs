@@ -144,8 +144,6 @@ pub fn preprocessed(src: &RgbaImage, settings: &Settings) -> RgbaImage {
 }
 
 /// Preprocesses and dithers all of `src`. Returns `None` if `cancelled` becomes true mid-run.
-// Not called by the app yet; exporting the result will use it.
-#[allow(dead_code)]
 pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Option<RgbaImage> {
     let (w, h) = processed_size(src, settings);
     process_region(src, settings, Region::full(w, h), cancelled)

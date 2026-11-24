@@ -1,5 +1,6 @@
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::thread;
 
 use eframe::egui::{self, ColorImage, Pos2, Rect, TextureHandle, TextureOptions, pos2, vec2};
 use image::RgbaImage;
@@ -14,6 +15,7 @@ use crate::engine::palette::{self, Metric, Palette};
 use crate::engine::preprocess::PreprocessSettings;
 use crate::engine::preprocess::output_size;
 use crate::engine::{MethodKind, Region, Settings};
+use crate::export;
 use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
 use crate::ui::viewer::{Layer, Viewer};
@@ -75,6 +77,11 @@ pub struct RakeinenApp {
     matrix_choice: Option<OrderedPreset>,
     extract_count: usize,
     extract_variety: f32,
+    export_open: bool,
+    export_scale: u32,
+    /// Receives the outcome of a PNG export running on a background thread.
+    export_job: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    status: Option<String>,
     show_original: bool,
 }
 
@@ -137,6 +144,10 @@ impl RakeinenApp {
             matrix_choice: Some(OrderedPreset::Bayer8),
             extract_count: 8,
             extract_variety: 0.5,
+            export_open: false,
+            export_scale: 1,
+            export_job: None,
+            status: None,
             show_original: false,
         }
     }
@@ -165,6 +176,7 @@ impl RakeinenApp {
                 });
                 self.result = None;
                 self.region_result = None;
+                self.status = None;
                 self.submitted = None;
                 self.submitted_partial = false;
                 self.pending = None;
@@ -173,6 +185,112 @@ impl RakeinenApp {
                 self.error = None;
             }
             Err(e) => self.error = Some(format!("Failed to open {}: {e}", path.display())),
+        }
+    }
+
+    fn export_window(&mut self, ctx: &egui::Context) {
+        if !self.export_open {
+            return;
+        }
+        let Some(source) = &self.source else {
+            self.export_open = false;
+            return;
+        };
+        let (width, height) = engine::processed_size(&source.pixels, &self.settings);
+        let pixel_size = self.settings.preprocess.pixel_size.max(1);
+
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new("Export PNG")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Scale");
+                    ui.add(
+                        egui::DragValue::new(&mut self.export_scale)
+                            .range(1..=export::MAX_SCALE)
+                            .prefix("×"),
+                    );
+                    if pixel_size > 1
+                        && ui
+                            .button("Match source size")
+                            .on_hover_text("Scale by the pixel size so the image keeps its original dimensions")
+                            .clicked()
+                    {
+                        self.export_scale = pixel_size.min(export::MAX_SCALE);
+                    }
+                });
+                let (out_w, out_h) = export::output_size(width, height, self.export_scale);
+                let too_big = out_w as u64 * out_h as u64 > export::MAX_OUTPUT_PIXELS;
+                ui.label(format!("Output: {out_w}×{out_h} pixels"));
+                if too_big {
+                    ui.colored_label(egui::Color32::LIGHT_RED, "Too large, lower the scale");
+                }
+                ui.add_enabled_ui(!too_big && self.export_job.is_none(), |ui| {
+                    save = ui.button("Save PNG…").clicked();
+                });
+            });
+        self.export_open = open;
+        if save {
+            self.start_export(ctx);
+        }
+    }
+
+    fn start_export(&mut self, ctx: &egui::Context) {
+        let Some(source) = &self.source else { return };
+        let stem = Path::new(&source.name)
+            .file_stem()
+            .map_or_else(|| "image".to_owned(), |s| s.to_string_lossy().into_owned());
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .set_file_name(format!("{stem}-dithered.png"))
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("png");
+        }
+
+        let pixels = source.pixels.clone();
+        let settings = self.settings.clone();
+        let scale = self.export_scale;
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let result = export::render(&pixels, &settings, scale)
+                .ok_or_else(|| "the export was cancelled".to_owned())
+                .and_then(|img| export::save_png(&img, &path))
+                .map(|()| path);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.export_job = Some(rx);
+        self.status = None;
+        self.export_open = false;
+    }
+
+    fn poll_export(&mut self) {
+        let Some(rx) = &self.export_job else { return };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("the export stopped unexpectedly".to_owned())
+            }
+        };
+        self.export_job = None;
+        match outcome {
+            Ok(path) => {
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                self.status = Some(format!("Saved {name}"));
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Failed to export: {e}")),
         }
     }
 
@@ -537,6 +655,8 @@ impl eframe::App for RakeinenApp {
         }
 
         self.sync_worker(&ctx);
+        self.poll_export();
+        self.export_window(&ctx);
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -573,6 +693,18 @@ impl eframe::App for RakeinenApp {
                             ui.label(format!("→ {}×{}", size[0], size[1]));
                         }
                     }
+                }
+                ui.add_enabled_ui(self.source.is_some() && self.export_job.is_none(), |ui| {
+                    if ui.button("Export…").clicked() {
+                        self.export_open = true;
+                    }
+                });
+                if self.export_job.is_some() {
+                    ui.spinner();
+                    ui.label("Exporting…");
+                }
+                if let Some(status) = &self.status {
+                    ui.label(status);
                 }
                 if let Some(err) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);

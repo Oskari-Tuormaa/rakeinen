@@ -11,10 +11,11 @@ A desktop app for dithering images, with a live preview that updates as you twea
 - **Ordered dithering** with Bayer 2/4/8/16, clustered-dot and line matrices.
 - **Noise dithering** with white noise (seeded) and blue noise (generated with void-and-cluster).
 - **Custom kernels and matrices.** Edit an error diffusion kernel or an ordered threshold matrix (up to 16×16, any shape) in the app, and save or load it as JSON.
-- **Palettes.** Edit colors by hand, pick a preset (black & white, grayscale, Game Boy, CGA, EGA, PICO-8), import or export `.hex` and `.gpl` files, or extract a palette from the loaded image.
+- **Palettes.** Edit colors by hand, pick a preset (black & white, grayscale, Game Boy, CGA, EGA, PICO-8), import or export `.hex` and `.gpl` files, or extract a palette from the image (after preprocessing) using k-means in Oklab, with a Variety control for how much large flat areas count.
 - **Color handling.** Choose RGB or Oklab for finding the closest palette color, and optionally dither in linear light.
 - **Preprocessing.** Pixel size (downscaling), brightness, contrast, gamma, grayscale and invert.
 - **Viewer.** Pan and zoom, a Fit button (or double-click), a 1:1 button for one image pixel per screen pixel, and a "Show original" toggle.
+- **Export.** Save the result as PNG with an optional integer upscale (up to ×32). "Match source size" scales a pixel-size result back to the original dimensions. Exporting always renders the whole image, in the background.
 
 ## Running
 
@@ -49,6 +50,7 @@ src/
   main.rs            entry point
   app.rs             application state and the settings panel
   worker.rs          background dithering thread, with cancellation of stale jobs
+  export.rs          full-image rendering, nearest-neighbour upscaling and PNG saving
   engine/
     mod.rs           settings and the processing pipeline
     preprocess.rs    resize and tone adjustments
@@ -72,5 +74,4 @@ cargo test
 
 ## Not done yet
 
-- Saving the result as PNG, with optional integer upscaling.
 - Saving and loading all settings as a preset.
