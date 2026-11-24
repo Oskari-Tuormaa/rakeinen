@@ -1,5 +1,6 @@
 pub mod diffusion;
 pub mod kernels;
+pub mod noise;
 pub mod ordered;
 pub mod palette;
 
@@ -7,6 +8,7 @@ use image::RgbaImage;
 
 use diffusion::{DiffusionParams, diffuse};
 use kernels::{BuiltinKernel, Kernel};
+use noise::{NoiseKind, NoiseParams};
 use ordered::{Matrix, OrderedParams, OrderedPreset};
 use palette::Palette;
 
@@ -17,15 +19,17 @@ pub type Cancel<'a> = &'a (dyn Fn() -> bool + Sync);
 pub enum MethodKind {
     Diffusion,
     Ordered,
+    Noise,
 }
 
 impl MethodKind {
-    pub const ALL: [MethodKind; 2] = [Self::Diffusion, Self::Ordered];
+    pub const ALL: [MethodKind; 3] = [Self::Diffusion, Self::Ordered, Self::Noise];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Diffusion => "Error diffusion",
             Self::Ordered => "Ordered",
+            Self::Noise => "Noise",
         }
     }
 }
@@ -44,10 +48,18 @@ pub struct OrderedSettings {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct NoiseSettings {
+    pub kind: NoiseKind,
+    pub spread: f32,
+    pub seed: u32,
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     pub method: MethodKind,
     pub diffusion: DiffusionSettings,
     pub ordered: OrderedSettings,
+    pub noise: NoiseSettings,
     pub palette: Palette,
 }
 
@@ -63,6 +75,11 @@ impl Default for Settings {
             ordered: OrderedSettings {
                 matrix: OrderedPreset::Bayer8.matrix(),
                 spread: 1.0,
+            },
+            noise: NoiseSettings {
+                kind: NoiseKind::Blue,
+                spread: 1.0,
+                seed: 0,
             },
             palette: Palette::black_white(),
         }
@@ -88,6 +105,16 @@ pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Optio
                 matrix: &settings.ordered.matrix,
                 palette: &settings.palette,
                 spread: settings.ordered.spread,
+            },
+            cancelled,
+        ),
+        MethodKind::Noise => noise::dither(
+            src,
+            &NoiseParams {
+                kind: settings.noise.kind,
+                palette: &settings.palette,
+                spread: settings.noise.spread,
+                seed: settings.noise.seed,
             },
             cancelled,
         ),

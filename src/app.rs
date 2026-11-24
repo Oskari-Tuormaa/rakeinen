@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::engine::kernels::{BuiltinKernel, Kernel};
+use crate::engine::noise::NoiseKind;
 use crate::engine::ordered::{Matrix, OrderedPreset};
 use crate::engine::palette;
 use crate::engine::{MethodKind, Settings};
@@ -172,6 +173,7 @@ impl RakeinenApp {
         match self.settings.method {
             MethodKind::Diffusion => self.diffusion_controls(ui),
             MethodKind::Ordered => self.ordered_controls(ui),
+            MethodKind::Noise => self.noise_controls(ui),
         }
 
         ui.separator();
@@ -245,6 +247,27 @@ impl RakeinenApp {
             });
 
         ui.add(egui::Slider::new(&mut self.settings.ordered.spread, 0.0..=2.0).text("Spread"));
+    }
+
+    fn noise_controls(&mut self, ui: &mut egui::Ui) {
+        let noise = &mut self.settings.noise;
+        egui::ComboBox::from_label("Noise")
+            .selected_text(noise.kind.name())
+            .show_ui(ui, |ui| {
+                for kind in NoiseKind::ALL {
+                    ui.selectable_value(&mut noise.kind, kind, kind.name());
+                }
+            });
+        ui.add(egui::Slider::new(&mut noise.spread, 0.0..=2.0).text("Spread"));
+        if noise.kind == NoiseKind::White {
+            ui.horizontal(|ui| {
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(&mut noise.seed));
+                if ui.button("Reroll").clicked() {
+                    noise.seed = noise.seed.wrapping_add(1);
+                }
+            });
+        }
     }
 
     fn palette_controls(&mut self, ui: &mut egui::Ui) {

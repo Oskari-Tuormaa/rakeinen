@@ -35,12 +35,18 @@ impl Matrix {
         Self::new(width, height, values)
     }
 
+    /// Whether the matrix is non-empty and its values match its dimensions.
+    pub fn is_well_formed(&self) -> bool {
+        self.width > 0 && self.height > 0 && self.values.len() == self.width * self.height
+    }
+
+    /// Checks a user-supplied matrix against the sizes the editor supports.
     pub fn validate(&self) -> Result<(), String> {
         let ok_size = |n: usize| (1..=MAX_MATRIX_SIZE).contains(&n);
         if !ok_size(self.width) || !ok_size(self.height) {
             return Err(format!("matrix size must be 1 to {MAX_MATRIX_SIZE}"));
         }
-        if self.values.len() != self.width * self.height {
+        if !self.is_well_formed() {
             return Err("matrix value count does not match its size".into());
         }
         Ok(())
@@ -196,15 +202,29 @@ pub struct OrderedParams<'a> {
 
 /// Runs ordered dithering. Returns `None` if `cancelled` reports true.
 pub fn dither(src: &RgbaImage, params: &OrderedParams, cancelled: Cancel) -> Option<RgbaImage> {
-    let (w, h) = (src.width() as usize, src.height() as usize);
-    if params.palette.is_empty() || params.matrix.validate().is_err() || w == 0 || h == 0 {
+    if !params.matrix.is_well_formed() {
         return Some(src.clone());
     }
-
     let thresholds = params.matrix.thresholds();
     let (mw, mh) = (params.matrix.width, params.matrix.height);
-    let amplitude = params.spread * params.palette.step_estimate();
-    let palette = params.palette;
+    dither_with(src, params.palette, params.spread, cancelled, |x, y| {
+        thresholds[(y % mh) * mw + x % mw]
+    })
+}
+
+/// Shared dithering core. `threshold(x, y)` returns a value in `-0.5..0.5` for each pixel.
+pub fn dither_with(
+    src: &RgbaImage,
+    palette: &Palette,
+    spread: f32,
+    cancelled: Cancel,
+    threshold: impl Fn(usize, usize) -> f32 + Sync,
+) -> Option<RgbaImage> {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    if palette.is_empty() || w == 0 || h == 0 {
+        return Some(src.clone());
+    }
+    let amplitude = spread * palette.step_estimate();
 
     let mut buf = src.as_raw().clone();
     buf.par_chunks_mut(w * 4)
@@ -213,10 +233,9 @@ pub fn dither(src: &RgbaImage, params: &OrderedParams, cancelled: Cancel) -> Opt
             if cancelled() {
                 return Err(());
             }
-            let matrix_row = (y % mh) * mw;
             for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 // A low threshold lets a pixel turn light first, so it is subtracted.
-                let offset = thresholds[matrix_row + x % mw] * amplitude;
+                let offset = threshold(x, y) * amplitude;
                 let value = [
                     px[0] as f32 - offset,
                     px[1] as f32 - offset,
