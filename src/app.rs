@@ -3,12 +3,16 @@ use std::sync::Arc;
 
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use crate::engine::Settings;
 use crate::engine::kernels::{BuiltinKernel, Kernel};
+use crate::engine::ordered::{Matrix, OrderedPreset};
 use crate::engine::palette;
-use crate::ui::kernel_editor::{self, EditorAction};
+use crate::engine::{MethodKind, Settings};
+use crate::ui::EditorAction;
 use crate::ui::viewer::Viewer;
+use crate::ui::{kernel_editor, matrix_editor};
 use crate::worker::Worker;
 
 const PREVIEW_TEXTURE: TextureOptions = TextureOptions {
@@ -34,6 +38,7 @@ pub struct RakeinenApp {
     submitted: Option<Settings>,
     pending: Option<u64>,
     kernel_choice: Option<BuiltinKernel>,
+    matrix_choice: Option<OrderedPreset>,
     show_original: bool,
 }
 
@@ -54,6 +59,7 @@ impl RakeinenApp {
             submitted: None,
             pending: None,
             kernel_choice: Some(BuiltinKernel::FloydSteinberg),
+            matrix_choice: Some(OrderedPreset::Bayer8),
             show_original: false,
         }
     }
@@ -92,37 +98,40 @@ impl RakeinenApp {
     }
 
     fn save_kernel(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Kernel", &["json"])
-            .set_file_name("kernel.json")
-            .save_file()
-        else {
-            return;
-        };
-        let result = serde_json::to_string_pretty(&self.settings.kernel)
-            .map_err(|e| e.to_string())
-            .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()));
+        let result = save_json(&self.settings.diffusion.kernel, "kernel.json");
         self.error = result.err().map(|e| format!("Failed to save kernel: {e}"));
     }
 
     fn load_kernel(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Kernel", &["json"])
-            .pick_file()
-        else {
+        let Some(result) = load_json::<Kernel>() else {
             return;
         };
-        let result = std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|json| serde_json::from_str::<Kernel>(&json).map_err(|e| e.to_string()))
-            .and_then(|kernel| kernel.validate().map(|()| kernel));
-        match result {
+        match result.and_then(|kernel| kernel.validate().map(|()| kernel)) {
             Ok(kernel) => {
-                self.settings.kernel = kernel;
+                self.settings.diffusion.kernel = kernel;
                 self.kernel_choice = None;
                 self.error = None;
             }
             Err(e) => self.error = Some(format!("Failed to load kernel: {e}")),
+        }
+    }
+
+    fn save_matrix(&mut self) {
+        let result = save_json(&self.settings.ordered.matrix, "matrix.json");
+        self.error = result.err().map(|e| format!("Failed to save matrix: {e}"));
+    }
+
+    fn load_matrix(&mut self) {
+        let Some(result) = load_json::<Matrix>() else {
+            return;
+        };
+        match result.and_then(|matrix| matrix.validate().map(|()| matrix)) {
+            Ok(matrix) => {
+                self.settings.ordered.matrix = matrix;
+                self.matrix_choice = None;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Failed to load matrix: {e}")),
         }
     }
 
@@ -150,9 +159,35 @@ impl RakeinenApp {
     }
 
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Error diffusion");
+        ui.heading("Method");
+        egui::ComboBox::from_id_salt("method")
+            .selected_text(self.settings.method.name())
+            .show_ui(ui, |ui| {
+                for method in MethodKind::ALL {
+                    ui.selectable_value(&mut self.settings.method, method, method.name());
+                }
+            });
         ui.add_space(4.0);
 
+        match self.settings.method {
+            MethodKind::Diffusion => self.diffusion_controls(ui),
+            MethodKind::Ordered => self.ordered_controls(ui),
+        }
+
+        ui.separator();
+        self.palette_controls(ui);
+
+        ui.separator();
+        ui.checkbox(&mut self.show_original, "Show original");
+        if self.pending.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Dithering…");
+            });
+        }
+    }
+
+    fn diffusion_controls(&mut self, ui: &mut egui::Ui) {
         let kernel_label = self.kernel_choice.map_or("Custom", BuiltinKernel::name);
         egui::ComboBox::from_label("Kernel")
             .selected_text(kernel_label)
@@ -161,7 +196,7 @@ impl RakeinenApp {
                     let selected = self.kernel_choice == Some(builtin);
                     if ui.selectable_label(selected, builtin.name()).clicked() {
                         self.kernel_choice = Some(builtin);
-                        self.settings.kernel = builtin.kernel();
+                        self.settings.diffusion.kernel = builtin.kernel();
                     }
                 }
             });
@@ -169,7 +204,7 @@ impl RakeinenApp {
         egui::CollapsingHeader::new("Kernel editor")
             .default_open(false)
             .show(ui, |ui| {
-                match kernel_editor::show(ui, &mut self.settings.kernel) {
+                match kernel_editor::show(ui, &mut self.settings.diffusion.kernel) {
                     EditorAction::None => {}
                     EditorAction::Edited => self.kernel_choice = None,
                     EditorAction::Save => self.save_kernel(),
@@ -177,10 +212,42 @@ impl RakeinenApp {
                 }
             });
 
-        ui.checkbox(&mut self.settings.serpentine, "Serpentine scan");
-        ui.add(egui::Slider::new(&mut self.settings.strength, 0.0..=1.5).text("Error strength"));
+        ui.checkbox(&mut self.settings.diffusion.serpentine, "Serpentine scan");
+        ui.add(
+            egui::Slider::new(&mut self.settings.diffusion.strength, 0.0..=1.5)
+                .text("Error strength"),
+        );
+    }
 
-        ui.separator();
+    fn ordered_controls(&mut self, ui: &mut egui::Ui) {
+        let matrix_label = self.matrix_choice.map_or("Custom", OrderedPreset::name);
+        egui::ComboBox::from_label("Matrix")
+            .selected_text(matrix_label)
+            .show_ui(ui, |ui| {
+                for preset in OrderedPreset::ALL {
+                    let selected = self.matrix_choice == Some(preset);
+                    if ui.selectable_label(selected, preset.name()).clicked() {
+                        self.matrix_choice = Some(preset);
+                        self.settings.ordered.matrix = preset.matrix();
+                    }
+                }
+            });
+
+        egui::CollapsingHeader::new("Matrix editor")
+            .default_open(false)
+            .show(ui, |ui| {
+                match matrix_editor::show(ui, &mut self.settings.ordered.matrix) {
+                    EditorAction::None => {}
+                    EditorAction::Edited => self.matrix_choice = None,
+                    EditorAction::Save => self.save_matrix(),
+                    EditorAction::Load => self.load_matrix(),
+                }
+            });
+
+        ui.add(egui::Slider::new(&mut self.settings.ordered.spread, 0.0..=2.0).text("Spread"));
+    }
+
+    fn palette_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Palette");
         let presets = palette::presets();
         let current = presets
@@ -197,16 +264,30 @@ impl RakeinenApp {
                     }
                 }
             });
-
-        ui.separator();
-        ui.checkbox(&mut self.show_original, "Show original");
-        if self.pending.is_some() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Dithering…");
-            });
-        }
     }
+}
+
+fn save_json<T: Serialize>(value: &T, file_name: &str) -> Result<(), String> {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("JSON", &["json"])
+        .set_file_name(file_name)
+        .save_file()
+    else {
+        return Ok(());
+    };
+    let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn load_json<T: DeserializeOwned>() -> Option<Result<T, String>> {
+    let path = rfd::FileDialog::new()
+        .add_filter("JSON", &["json"])
+        .pick_file()?;
+    Some(
+        std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string())),
+    )
 }
 
 impl eframe::App for RakeinenApp {

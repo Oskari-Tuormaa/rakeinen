@@ -2,15 +2,10 @@ use eframe::egui::{self, DragValue, RichText};
 
 use crate::engine::kernels::Kernel;
 
+use super::EditorAction;
+
 const MAX_ROWS: usize = 5;
 const MAX_COLS: usize = 9;
-
-pub enum EditorAction {
-    None,
-    Edited,
-    Save,
-    Load,
-}
 
 /// Editable grid of kernel weights. Cells before the current pixel in scan order are inert.
 pub fn show(ui: &mut egui::Ui, kernel: &mut Kernel) -> EditorAction {

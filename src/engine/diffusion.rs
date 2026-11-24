@@ -1,5 +1,6 @@
 use image::{Rgba, RgbaImage};
 
+use super::Cancel;
 use super::kernels::{Kernel, Tap};
 use super::palette::Palette;
 
@@ -11,11 +12,7 @@ pub struct DiffusionParams<'a> {
 }
 
 /// Runs error diffusion. Returns `None` when `cancelled` reports true between scanlines.
-pub fn diffuse(
-    src: &RgbaImage,
-    params: &DiffusionParams,
-    cancelled: &dyn Fn() -> bool,
-) -> Option<RgbaImage> {
+pub fn diffuse(src: &RgbaImage, params: &DiffusionParams, cancelled: Cancel) -> Option<RgbaImage> {
     let (w, h) = (src.width() as usize, src.height() as usize);
     let mut out = src.clone();
     if params.palette.is_empty() || w == 0 || h == 0 {

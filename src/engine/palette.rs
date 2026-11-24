@@ -27,6 +27,31 @@ impl Palette {
         self.colors.is_empty()
     }
 
+    /// Typical per-channel distance between neighbouring palette colors (255 for black and white).
+    pub fn step_estimate(&self) -> f32 {
+        if self.colors.len() < 2 {
+            return 0.0;
+        }
+        let dist = |a: &[u8; 3], b: &[u8; 3]| {
+            let d = |i: usize| a[i] as f32 - b[i] as f32;
+            (d(0).powi(2) + d(1).powi(2) + d(2).powi(2)).sqrt()
+        };
+        let total: f32 = self
+            .colors
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                self.colors
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, b)| dist(a, b))
+                    .fold(f32::INFINITY, f32::min)
+            })
+            .sum();
+        total / self.colors.len() as f32 / 3f32.sqrt()
+    }
+
     /// Index of the palette color closest to `rgb` (0..=255 per channel). The palette must not be empty.
     pub fn nearest(&self, rgb: [f32; 3]) -> usize {
         let mut best = 0;
@@ -80,6 +105,13 @@ mod tests {
         let p = Palette::black_white();
         assert_eq!(p.nearest([10.0, 10.0, 10.0]), 0);
         assert_eq!(p.nearest([200.0, 200.0, 200.0]), 1);
+    }
+
+    #[test]
+    fn step_estimate_matches_gray_steps() {
+        assert!((Palette::black_white().step_estimate() - 255.0).abs() < 0.01);
+        assert!((Palette::grayscale(4).step_estimate() - 85.0).abs() < 0.01);
+        assert_eq!(Palette::new(vec![[1, 2, 3]]).step_estimate(), 0.0);
     }
 
     #[test]
