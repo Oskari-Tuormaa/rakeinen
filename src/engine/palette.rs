@@ -27,10 +27,6 @@ impl Palette {
         Self { colors }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.colors.is_empty()
-    }
-
     /// One `RRGGBB` color per line, as used by Lospec `.hex` files.
     pub fn to_hex(&self) -> String {
         self.colors

@@ -9,9 +9,11 @@ use serde::de::DeserializeOwned;
 use crate::engine::kernels::{BuiltinKernel, Kernel};
 use crate::engine::noise::NoiseKind;
 use crate::engine::ordered::{Matrix, OrderedPreset};
-use crate::engine::palette;
+use crate::engine::palette::{self, Metric, Palette};
+use crate::engine::preprocess::PreprocessSettings;
 use crate::engine::{MethodKind, Settings};
 use crate::ui::EditorAction;
+use crate::ui::palette_editor::{self, PaletteAction};
 use crate::ui::viewer::Viewer;
 use crate::ui::{kernel_editor, matrix_editor};
 use crate::worker::Worker;
@@ -40,6 +42,7 @@ pub struct RakeinenApp {
     pending: Option<u64>,
     kernel_choice: Option<BuiltinKernel>,
     matrix_choice: Option<OrderedPreset>,
+    extract_count: usize,
     show_original: bool,
 }
 
@@ -61,6 +64,7 @@ impl RakeinenApp {
             pending: None,
             kernel_choice: Some(BuiltinKernel::FloydSteinberg),
             matrix_choice: Some(OrderedPreset::Bayer8),
+            extract_count: 8,
             show_original: false,
         }
     }
@@ -160,6 +164,13 @@ impl RakeinenApp {
     }
 
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| self.settings_contents(ui));
+    }
+
+    fn settings_contents(&mut self, ui: &mut egui::Ui) {
+        self.preprocess_controls(ui);
+
+        ui.separator();
         ui.heading("Method");
         egui::ComboBox::from_id_salt("method")
             .selected_text(self.settings.method.name())
@@ -270,6 +281,28 @@ impl RakeinenApp {
         }
     }
 
+    fn preprocess_controls(&mut self, ui: &mut egui::Ui) {
+        let pre = &mut self.settings.preprocess;
+        ui.horizontal(|ui| {
+            ui.heading("Preprocess");
+            if ui.small_button("Reset").clicked() {
+                *pre = PreprocessSettings::default();
+            }
+        });
+        ui.add(egui::Slider::new(&mut pre.pixel_size, 1..=32).text("Pixel size"));
+        ui.add(egui::Slider::new(&mut pre.brightness, -1.0..=1.0).text("Brightness"));
+        ui.add(egui::Slider::new(&mut pre.contrast, -1.0..=1.0).text("Contrast"));
+        ui.add(
+            egui::Slider::new(&mut pre.gamma, 0.2..=3.0)
+                .logarithmic(true)
+                .text("Gamma"),
+        );
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut pre.grayscale, "Grayscale");
+            ui.checkbox(&mut pre.invert, "Invert");
+        });
+    }
+
     fn palette_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Palette");
         let presets = palette::presets();
@@ -287,6 +320,82 @@ impl RakeinenApp {
                     }
                 }
             });
+
+        let can_extract = self.source.is_some();
+        let action = palette_editor::show(
+            ui,
+            &mut self.settings.palette,
+            &mut self.extract_count,
+            can_extract,
+        );
+        match action {
+            PaletteAction::None | PaletteAction::Edited => {}
+            PaletteAction::Import => self.import_palette(),
+            PaletteAction::Export => self.export_palette(),
+            PaletteAction::Extract => {
+                if let Some(src) = &self.source {
+                    self.settings.palette = Palette::extract(&src.pixels, self.extract_count);
+                }
+            }
+        }
+
+        ui.checkbox(
+            &mut self.settings.color.linear_light,
+            "Dither in linear light",
+        )
+        .on_hover_text("Preserves overall brightness better, especially with few colors");
+        egui::ComboBox::from_label("Color distance")
+            .selected_text(self.settings.color.metric.name())
+            .show_ui(ui, |ui| {
+                for metric in Metric::ALL {
+                    ui.selectable_value(&mut self.settings.color.metric, metric, metric.name());
+                }
+            });
+    }
+
+    fn import_palette(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Palette", &["hex", "gpl", "txt"])
+            .pick_file()
+        else {
+            return;
+        };
+        let extension = path.extension().map(|e| e.to_string_lossy().into_owned());
+        let result = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| Palette::parse(extension.as_deref().unwrap_or(""), &text));
+        match result {
+            Ok(palette) => {
+                self.settings.palette = palette;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Failed to import palette: {e}")),
+        }
+    }
+
+    fn export_palette(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Hex palette", &["hex"])
+            .add_filter("GIMP palette", &["gpl"])
+            .set_file_name("palette.hex")
+            .save_file()
+        else {
+            return;
+        };
+        let is_gpl = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gpl"));
+        let text = if is_gpl {
+            let name = path
+                .file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            self.settings.palette.to_gpl(&name)
+        } else {
+            self.settings.palette.to_hex()
+        };
+        self.error = std::fs::write(&path, text)
+            .err()
+            .map(|e| format!("Failed to export palette: {e}"));
     }
 }
 
@@ -337,6 +446,12 @@ impl eframe::App for RakeinenApp {
                         src.texture.size()[1],
                         self.viewer.zoom() * 100.0
                     ));
+                    if let Some(result) = &self.result {
+                        let size = result.size();
+                        if size != src.texture.size() {
+                            ui.label(format!("→ {}×{}", size[0], size[1]));
+                        }
+                    }
                 }
                 if let Some(err) = &self.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
@@ -352,7 +467,7 @@ impl eframe::App for RakeinenApp {
                     (Some(result), false) => result,
                     _ => &src.texture,
                 };
-                self.viewer.show(ui, texture);
+                self.viewer.show(ui, texture, src.texture.size_vec2());
             }
             None => {
                 ui.centered_and_justified(|ui| {

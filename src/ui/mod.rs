@@ -1,5 +1,6 @@
 pub mod kernel_editor;
 pub mod matrix_editor;
+pub mod palette_editor;
 pub mod viewer;
 
 /// What an editor widget wants the app to do after this frame.

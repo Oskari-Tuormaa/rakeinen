@@ -25,9 +25,9 @@ impl Viewer {
         self.zoom
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, texture: &TextureHandle) {
+    /// Draws `texture` stretched to `image_size`, which may differ from the texture's own size.
+    pub fn show(&mut self, ui: &mut egui::Ui, texture: &TextureHandle, image_size: Vec2) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-        let image_size = texture.size_vec2();
 
         if self.fit || response.double_clicked() {
             self.zoom = (rect.width() / image_size.x).min(rect.height() / image_size.y);
