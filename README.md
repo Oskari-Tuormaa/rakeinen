@@ -6,7 +6,7 @@ A desktop app for dithering images, with a live preview that updates as you twea
 
 ## Features
 
-- **Live preview.** Dithering runs on a background thread and the result updates as you change a setting. On large images a reduced-quality preview is shown while you drag a slider, followed by one full-quality pass when you let go.
+- **Live preview.** Dithering runs on a background thread and the result updates as you change a setting. On large images only the visible area is dithered while you drag a slider, at full resolution, followed by one pass over the whole image when you let go.
 - **Error diffusion** with Floyd–Steinberg, Jarvis–Judice–Ninke, Stucki, Atkinson, Burkes, Sierra, Sierra Two-Row and Sierra Lite. Options for serpentine scanning and error strength.
 - **Ordered dithering** with Bayer 2/4/8/16, clustered-dot and line matrices.
 - **Noise dithering** with white noise (seeded) and blue noise (generated with void-and-cluster).

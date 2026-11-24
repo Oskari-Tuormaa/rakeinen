@@ -1,6 +1,12 @@
 use eframe::egui::emath::GuiRounding;
 use eframe::egui::{self, Color32, Rect, Sense, TextureHandle, Vec2, pos2};
 
+/// A texture drawn over `rect`, given in image coordinates (pixels of the original image).
+pub struct Layer<'a> {
+    pub texture: &'a TextureHandle,
+    pub rect: Rect,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewRequest {
     None,
@@ -12,6 +18,7 @@ pub struct Viewer {
     zoom: f32,
     pan: Vec2,
     request: ViewRequest,
+    visible: Option<Rect>,
 }
 
 impl Default for Viewer {
@@ -20,6 +27,7 @@ impl Default for Viewer {
             zoom: 1.0,
             pan: Vec2::ZERO,
             request: ViewRequest::Fit,
+            visible: None,
         }
     }
 }
@@ -39,8 +47,13 @@ impl Viewer {
         self.zoom * pixels_per_point
     }
 
-    /// Draws `texture` stretched to `image_size`, which may differ from the texture's own size.
-    pub fn show(&mut self, ui: &mut egui::Ui, texture: &TextureHandle, image_size: Vec2) {
+    /// The part of the image on screen as of the last drawn frame, in image coordinates.
+    pub fn visible_rect(&self) -> Option<Rect> {
+        self.visible
+    }
+
+    /// Draws `layers` back to front over an image of `image_size`.
+    pub fn show(&mut self, ui: &mut egui::Ui, image_size: Vec2, layers: &[Layer]) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
         if response.double_clicked() {
@@ -81,11 +94,29 @@ impl Viewer {
             image_rect.size(),
         );
         painter.rect_filled(rect, 0.0, Color32::from_gray(24));
-        painter.image(
-            texture.id(),
-            image_rect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        for layer in layers {
+            let min = image_rect.min + layer.rect.min.to_vec2() * self.zoom;
+            let max = image_rect.min + layer.rect.max.to_vec2() * self.zoom;
+            painter.image(
+                layer.texture.id(),
+                Rect::from_min_max(min, max),
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
+        let on_screen = rect.intersect(image_rect);
+        self.visible = (on_screen.width() > 0.0 && on_screen.height() > 0.0).then(|| {
+            Rect::from_min_max(
+                pos2(
+                    (on_screen.min.x - image_rect.min.x) / self.zoom,
+                    (on_screen.min.y - image_rect.min.y) / self.zoom,
+                ),
+                pos2(
+                    (on_screen.max.x - image_rect.min.x) / self.zoom,
+                    (on_screen.max.y - image_rect.min.y) / self.zoom,
+                ),
+            )
+        });
     }
 }

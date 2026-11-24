@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
+use eframe::egui::{self, ColorImage, Pos2, Rect, TextureHandle, TextureOptions, pos2, vec2};
 use image::RgbaImage;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -11,19 +11,44 @@ use crate::engine::noise::NoiseKind;
 use crate::engine::ordered::{Matrix, OrderedPreset};
 use crate::engine::palette::{self, Metric, Palette};
 use crate::engine::preprocess::PreprocessSettings;
-use crate::engine::{MethodKind, Settings};
+use crate::engine::preprocess::output_size;
+use crate::engine::{MethodKind, Region, Settings};
 use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
-use crate::ui::viewer::Viewer;
+use crate::ui::viewer::{Layer, Viewer};
 use crate::ui::{kernel_editor, matrix_editor};
-use crate::worker::{Worker, preview_factor};
+use crate::worker::{Output, Worker};
 
-const PREVIEW_TEXTURE: TextureOptions = TextureOptions {
+const TEXTURE_OPTIONS: TextureOptions = TextureOptions {
     magnification: egui::TextureFilter::Nearest,
     minification: egui::TextureFilter::Linear,
     wrap_mode: egui::TextureWrapMode::ClampToEdge,
     mipmap_mode: None,
 };
+
+/// Below this many processed pixels the whole image is always dithered, because it is quick.
+const REGION_MIN_PIXELS: u64 = 1_500_000;
+/// Extra processed pixels dithered around the visible area while dragging.
+const REGION_PADDING: f32 = 8.0;
+
+/// A dithered texture and where it belongs in the image.
+struct ResultLayer {
+    texture: TextureHandle,
+    region: Region,
+    /// Source pixels per pixel of `texture`.
+    pixel_size: u32,
+}
+
+impl ResultLayer {
+    /// The area this layer covers, in pixels of the original image.
+    fn image_rect(&self) -> Rect {
+        let scale = self.pixel_size as f32;
+        Rect::from_min_size(
+            pos2(self.region.x as f32 * scale, self.region.y as f32 * scale),
+            vec2(self.region.w as f32 * scale, self.region.h as f32 * scale),
+        )
+    }
+}
 
 struct SourceImage {
     name: String,
@@ -33,19 +58,59 @@ struct SourceImage {
 
 pub struct RakeinenApp {
     source: Option<SourceImage>,
-    result: Option<TextureHandle>,
+    /// The whole processed image.
+    result: Option<ResultLayer>,
+    /// Just the visible part, shown on top of `result` while dragging a setting.
+    region_result: Option<ResultLayer>,
     viewer: Viewer,
     error: Option<String>,
     worker: Worker,
     settings: Settings,
     submitted: Option<Settings>,
-    submitted_preview: bool,
-    result_is_preview: bool,
+    /// Whether the newest job covers only part of the image, so a full pass is still owed.
+    submitted_partial: bool,
     pending: Option<u64>,
     kernel_choice: Option<BuiltinKernel>,
     matrix_choice: Option<OrderedPreset>,
     extract_count: usize,
     show_original: bool,
+}
+
+/// The processed-image region covering `visible` (in original-image pixels) plus some padding.
+fn region_around(visible: Rect, pixel_size: u32, size: (u32, u32)) -> Region {
+    let scale = pixel_size.max(1) as f32;
+    let low = |v: f32| ((v / scale).floor() - REGION_PADDING).max(0.0) as u32;
+    let high = |v: f32| ((v / scale).ceil() + REGION_PADDING).max(0.0) as u32;
+    let (x0, y0) = (low(visible.min.x), low(visible.min.y));
+    let (x1, y1) = (
+        high(visible.max.x).min(size.0),
+        high(visible.max.y).min(size.1),
+    );
+    Region {
+        x: x0,
+        y: y0,
+        w: x1.saturating_sub(x0),
+        h: y1.saturating_sub(y0),
+    }
+    .clamped(size.0, size.1)
+}
+
+fn update_layer(ctx: &egui::Context, slot: &mut Option<ResultLayer>, name: &str, output: &Output) {
+    let image = to_color_image(&output.image);
+    match slot {
+        Some(layer) => {
+            layer.texture.set(image, TEXTURE_OPTIONS);
+            layer.region = output.region;
+            layer.pixel_size = output.pixel_size;
+        }
+        None => {
+            *slot = Some(ResultLayer {
+                texture: ctx.load_texture(name, image, TEXTURE_OPTIONS),
+                region: output.region,
+                pixel_size: output.pixel_size,
+            });
+        }
+    }
 }
 
 fn to_color_image(img: &RgbaImage) -> ColorImage {
@@ -58,13 +123,13 @@ impl RakeinenApp {
         Self {
             source: None,
             result: None,
+            region_result: None,
             viewer: Viewer::default(),
             error: None,
             worker: Worker::spawn(ctx),
             settings: Settings::default(),
             submitted: None,
-            submitted_preview: false,
-            result_is_preview: false,
+            submitted_partial: false,
             pending: None,
             kernel_choice: Some(BuiltinKernel::FloydSteinberg),
             matrix_choice: Some(OrderedPreset::Bayer8),
@@ -86,7 +151,7 @@ impl RakeinenApp {
         match image::open(path) {
             Ok(img) => {
                 let pixels = img.to_rgba8();
-                let texture = ctx.load_texture("source", to_color_image(&pixels), PREVIEW_TEXTURE);
+                let texture = ctx.load_texture("source", to_color_image(&pixels), TEXTURE_OPTIONS);
                 self.source = Some(SourceImage {
                     name: path
                         .file_name()
@@ -96,9 +161,9 @@ impl RakeinenApp {
                     texture,
                 });
                 self.result = None;
+                self.region_result = None;
                 self.submitted = None;
-                self.submitted_preview = false;
-                self.result_is_preview = false;
+                self.submitted_partial = false;
                 self.pending = None;
                 self.worker.cancel();
                 self.viewer.request_fit();
@@ -146,31 +211,49 @@ impl RakeinenApp {
         }
     }
 
+    /// The part of the processed image to dither while a setting is being dragged, or `None`
+    /// when the whole image should be dithered.
+    fn drag_region(&self) -> Option<Region> {
+        let source = self.source.as_ref()?;
+        let visible = self.viewer.visible_rect()?;
+        let (w, h) = output_size(
+            source.pixels.width(),
+            source.pixels.height(),
+            self.settings.preprocess.pixel_size,
+        );
+        let total = w as u64 * h as u64;
+        if total < REGION_MIN_PIXELS {
+            return None;
+        }
+        let region = region_around(visible, self.settings.preprocess.pixel_size, (w, h));
+        // Not worth the extra full pass when most of the image is visible anyway.
+        (region.area() * 10 < total * 7).then_some(region)
+    }
+
     fn sync_worker(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.source else { return };
 
-        // While a pointer button is held (slider drags), large images get a fast reduced-quality
-        // preview, and one full-quality pass follows on release.
+        // While a pointer button is held (slider drags), large images only get the visible area
+        // dithered, and one full pass follows on release.
         let dragging = ctx.input(|i| i.pointer.any_down());
-        let want_preview =
-            dragging && preview_factor(source.pixels.width(), source.pixels.height()) > 1;
+        let region = if dragging { self.drag_region() } else { None };
         let changed = self.submitted.as_ref() != Some(&self.settings);
-        if changed || (self.submitted_preview && !want_preview) {
+        if changed || (self.submitted_partial && region.is_none()) {
             let generation =
                 self.worker
-                    .submit(source.pixels.clone(), self.settings.clone(), want_preview);
+                    .submit(source.pixels.clone(), self.settings.clone(), region);
             self.pending = Some(generation);
             self.submitted = Some(self.settings.clone());
-            self.submitted_preview = want_preview;
+            self.submitted_partial = region.is_some();
         }
 
         if let Some(output) = self.worker.poll() {
-            let image = to_color_image(&output.image);
-            match &mut self.result {
-                Some(tex) => tex.set(image, PREVIEW_TEXTURE),
-                None => self.result = Some(ctx.load_texture("result", image, PREVIEW_TEXTURE)),
+            if output.full {
+                update_layer(ctx, &mut self.result, "result", &output);
+                self.region_result = None;
+            } else {
+                update_layer(ctx, &mut self.region_result, "region", &output);
             }
-            self.result_is_preview = output.preview;
             if self.pending == Some(output.generation) {
                 self.pending = None;
             }
@@ -211,8 +294,8 @@ impl RakeinenApp {
                 ui.spinner();
                 ui.label("Dithering…");
             });
-        } else if self.result_is_preview {
-            ui.label("Preview quality while dragging");
+        } else if self.region_result.is_some() {
+            ui.label("Showing the visible area only while dragging");
         }
     }
 
@@ -479,7 +562,7 @@ impl eframe::App for RakeinenApp {
                         self.viewer.scale(ctx.pixels_per_point()) * 100.0
                     ));
                     if let Some(result) = &self.result {
-                        let size = result.size();
+                        let size = result.texture.size();
                         if size != src.texture.size() {
                             ui.label(format!("→ {}×{}", size[0], size[1]));
                         }
@@ -495,11 +578,22 @@ impl eframe::App for RakeinenApp {
 
         egui::CentralPanel::default().show(ui, |ui| match &self.source {
             Some(src) => {
-                let texture = match (&self.result, self.show_original) {
-                    (Some(result), false) => result,
-                    _ => &src.texture,
-                };
-                self.viewer.show(ui, texture, src.texture.size_vec2());
+                let image_size = src.texture.size_vec2();
+                let mut layers = Vec::new();
+                if self.show_original || self.result.is_none() {
+                    layers.push(Layer {
+                        texture: &src.texture,
+                        rect: Rect::from_min_size(Pos2::ZERO, image_size),
+                    });
+                } else {
+                    for layer in [&self.result, &self.region_result].into_iter().flatten() {
+                        layers.push(Layer {
+                            texture: &layer.texture,
+                            rect: layer.image_rect(),
+                        });
+                    }
+                }
+                self.viewer.show(ui, image_size, &layers);
             }
             None => {
                 ui.centered_and_justified(|ui| {
@@ -507,5 +601,50 @@ impl eframe::App for RakeinenApp {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+        Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
+    }
+
+    #[test]
+    fn region_is_the_visible_area_plus_padding() {
+        let r = region_around(rect(100.0, 100.0, 300.0, 200.0), 1, (1000, 1000));
+        assert_eq!(
+            r,
+            Region {
+                x: 92,
+                y: 92,
+                w: 216,
+                h: 116
+            }
+        );
+    }
+
+    #[test]
+    fn region_converts_to_processed_pixels() {
+        let r = region_around(rect(100.0, 100.0, 300.0, 200.0), 4, (1000, 1000));
+        assert_eq!(
+            r,
+            Region {
+                x: 17,
+                y: 17,
+                w: 66,
+                h: 41
+            }
+        );
+    }
+
+    #[test]
+    fn region_stays_inside_the_image() {
+        let r = region_around(rect(0.0, 0.0, 50.0, 50.0), 1, (1000, 1000));
+        assert_eq!((r.x, r.y), (0, 0));
+        let r = region_around(rect(900.0, 900.0, 5000.0, 5000.0), 1, (1000, 1000));
+        assert_eq!((r.x + r.w, r.y + r.h), (1000, 1000));
     }
 }

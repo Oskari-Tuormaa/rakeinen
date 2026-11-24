@@ -138,6 +138,8 @@ pub fn processed_size(src: &RgbaImage, settings: &Settings) -> (u32, u32) {
 }
 
 /// Preprocesses and dithers all of `src`. Returns `None` if `cancelled` becomes true mid-run.
+// Not called by the app yet; exporting the result will use it.
+#[allow(dead_code)]
 pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Option<RgbaImage> {
     let (w, h) = processed_size(src, settings);
     process_region(src, settings, Region::full(w, h), cancelled)
@@ -289,8 +291,10 @@ mod tests {
     fn ordered_region_equals_the_same_area_of_a_full_run() {
         let src = gradient(160, 140);
         for pixel_size in [1, 2] {
-            let mut s = Settings::default();
-            s.method = MethodKind::Ordered;
+            let mut s = Settings {
+                method: MethodKind::Ordered,
+                ..Settings::default()
+            };
             s.preprocess.pixel_size = pixel_size;
             s.preprocess.contrast = 0.2;
             let whole = full(&src, &s);
@@ -306,8 +310,10 @@ mod tests {
     fn noise_regions_equal_the_same_area_of_a_full_run() {
         let src = gradient(160, 140);
         for kind in noise::NoiseKind::ALL {
-            let mut s = Settings::default();
-            s.method = MethodKind::Noise;
+            let mut s = Settings {
+                method: MethodKind::Noise,
+                ..Settings::default()
+            };
             s.noise.kind = kind;
             s.noise.seed = 9;
             let whole = full(&src, &s);
