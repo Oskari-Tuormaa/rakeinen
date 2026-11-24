@@ -94,7 +94,7 @@ impl Kernel {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.rows == 0 || self.cols == 0 || self.cols % 2 == 0 {
+        if self.rows == 0 || self.cols == 0 || self.cols.is_multiple_of(2) {
             return Err("kernel needs at least one row and an odd number of columns".into());
         }
         if self.weights.len() != self.rows * self.cols {

@@ -5,8 +5,9 @@ use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
 
 use crate::engine::Settings;
-use crate::engine::kernels::BuiltinKernel;
+use crate::engine::kernels::{BuiltinKernel, Kernel};
 use crate::engine::palette;
+use crate::ui::kernel_editor::{self, EditorAction};
 use crate::ui::viewer::Viewer;
 use crate::worker::Worker;
 
@@ -90,6 +91,41 @@ impl RakeinenApp {
         }
     }
 
+    fn save_kernel(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Kernel", &["json"])
+            .set_file_name("kernel.json")
+            .save_file()
+        else {
+            return;
+        };
+        let result = serde_json::to_string_pretty(&self.settings.kernel)
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()));
+        self.error = result.err().map(|e| format!("Failed to save kernel: {e}"));
+    }
+
+    fn load_kernel(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Kernel", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| serde_json::from_str::<Kernel>(&json).map_err(|e| e.to_string()))
+            .and_then(|kernel| kernel.validate().map(|()| kernel));
+        match result {
+            Ok(kernel) => {
+                self.settings.kernel = kernel;
+                self.kernel_choice = None;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Failed to load kernel: {e}")),
+        }
+    }
+
     fn sync_worker(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.source else { return };
 
@@ -127,6 +163,17 @@ impl RakeinenApp {
                         self.kernel_choice = Some(builtin);
                         self.settings.kernel = builtin.kernel();
                     }
+                }
+            });
+
+        egui::CollapsingHeader::new("Kernel editor")
+            .default_open(false)
+            .show(ui, |ui| {
+                match kernel_editor::show(ui, &mut self.settings.kernel) {
+                    EditorAction::None => {}
+                    EditorAction::Edited => self.kernel_choice = None,
+                    EditorAction::Save => self.save_kernel(),
+                    EditorAction::Load => self.load_kernel(),
                 }
             });
 
