@@ -15,6 +15,7 @@ pub fn show(
     ui: &mut egui::Ui,
     palette: &mut Palette,
     extract_count: &mut usize,
+    extract_variety: &mut f32,
     can_extract: bool,
 ) -> PaletteAction {
     let mut action = PaletteAction::None;
@@ -61,6 +62,10 @@ pub fn show(
         }
     });
 
+    ui.add(egui::Slider::new(extract_variety, 0.0..=1.0).text("Variety"))
+        .on_hover_text(
+            "Low: colors follow how much area they cover.\nHigh: small accent colors count as much as large areas.",
+        );
     ui.horizontal(|ui| {
         ui.add(
             DragValue::new(extract_count)
@@ -69,7 +74,9 @@ pub fn show(
         );
         if ui
             .add_enabled(can_extract, egui::Button::new("Extract from image"))
-            .on_hover_text("Pick representative colors from the loaded image (median cut)")
+            .on_hover_text(
+                "Pick representative colors from the image, after preprocessing (k-means in Oklab)",
+            )
             .clicked()
         {
             action = PaletteAction::Extract;

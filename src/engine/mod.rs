@@ -137,6 +137,12 @@ pub fn processed_size(src: &RgbaImage, settings: &Settings) -> (u32, u32) {
     output_size(src.width(), src.height(), settings.preprocess.pixel_size)
 }
 
+/// `src` after preprocessing but before dithering, which is what the dithering actually sees.
+pub fn preprocessed(src: &RgbaImage, settings: &Settings) -> RgbaImage {
+    let (w, h) = processed_size(src, settings);
+    preprocess_region(src, &settings.preprocess, Region::full(w, h))
+}
+
 /// Preprocesses and dithers all of `src`. Returns `None` if `cancelled` becomes true mid-run.
 // Not called by the app yet; exporting the result will use it.
 #[allow(dead_code)]

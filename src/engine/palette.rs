@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use image::RgbaImage;
 
 pub const MAX_PALETTE_COLORS: usize = 256;
@@ -108,59 +110,188 @@ impl Palette {
         Ok(Self { colors })
     }
 
-    /// Picks up to `count` representative colors from `img` using median cut.
-    pub fn extract(img: &RgbaImage, count: usize) -> Self {
+    /// Picks `count` representative colors from `img` with weighted k-means in Oklab.
+    ///
+    /// Pixels are first grouped into a histogram of similar colors, so large flat areas are one
+    /// heavy point instead of millions of samples. `variety` runs from 0 to 1: at 0 every
+    /// group counts by its pixel count, and at 1 every distinct group counts equally, which
+    /// favours small accents over large areas.
+    pub fn extract(img: &RgbaImage, count: usize, variety: f32) -> Self {
         let count = count.clamp(1, MAX_PALETTE_COLORS);
-        let step = (img.width() as usize * img.height() as usize / 65_536).max(1);
-        let pixels: Vec<[u8; 3]> = img
-            .pixels()
-            .step_by(step)
-            .filter(|p| p[3] > 0)
-            .map(|p| [p[0], p[1], p[2]])
-            .collect();
-        if pixels.is_empty() {
+        let points = color_histogram(img, 1.0 - variety.clamp(0.0, 1.0));
+        if points.is_empty() {
             return Self::black_white();
         }
 
-        let channel_range = |b: &[[u8; 3]], ch: usize| {
-            let min = b.iter().map(|p| p[ch]).min().unwrap_or(0);
-            let max = b.iter().map(|p| p[ch]).max().unwrap_or(0);
-            max - min
-        };
-        let widest = |b: &[[u8; 3]]| (0..3).max_by_key(|&ch| channel_range(b, ch)).unwrap();
-
-        let mut boxes = vec![pixels];
-        while boxes.len() < count {
-            let candidate = boxes
+        let mut colors: Vec<[u8; 3]> = if points.len() <= count {
+            points
                 .iter()
-                .enumerate()
-                .filter(|(_, b)| b.len() > 1)
-                .map(|(i, b)| (i, channel_range(b, widest(b))))
-                .filter(|&(_, range)| range > 0)
-                .max_by_key(|&(_, range)| range);
-            let Some((index, _)) = candidate else { break };
-
-            let mut b = boxes.swap_remove(index);
-            let ch = widest(&b);
-            b.sort_unstable_by_key(|p| p[ch]);
-            let upper = b.split_off(b.len() / 2);
-            boxes.push(b);
-            boxes.push(upper);
-        }
-
-        let mut colors: Vec<[u8; 3]> = boxes
-            .iter()
-            .map(|b| {
-                let mean = |ch: usize| {
-                    (b.iter().map(|p| p[ch] as u64).sum::<u64>() / b.len() as u64) as u8
-                };
-                [mean(0), mean(1), mean(2)]
-            })
-            .collect();
+                .map(|p| p.rgb.map(|c| c.round() as u8))
+                .collect()
+        } else {
+            kmeans(&points, count)
+        };
         colors.sort_by_key(|c| c[0] as u32 * 299 + c[1] as u32 * 587 + c[2] as u32 * 114);
         colors.dedup();
         Self { colors }
     }
+}
+
+/// A group of similar pixel colors.
+struct ColorPoint {
+    /// Mean sRGB color of the group, 0..=255 per channel.
+    rgb: [f32; 3],
+    lab: [f32; 3],
+    weight: f32,
+}
+
+/// Groups the opaque pixels of `img` into 5-bit-per-channel bins. Each bin weighs
+/// `pixel count ^ exponent`.
+fn color_histogram(img: &RgbaImage, exponent: f32) -> Vec<ColorPoint> {
+    const SAMPLE_LIMIT: usize = 250_000;
+    let step = (img.width() as usize * img.height() as usize / SAMPLE_LIMIT).max(1);
+
+    let mut bins: HashMap<u16, ([u64; 3], u32)> = HashMap::new();
+    for p in img.pixels().step_by(step).filter(|p| p[3] > 0) {
+        let key = ((p[0] >> 3) as u16) << 10 | ((p[1] >> 3) as u16) << 5 | (p[2] >> 3) as u16;
+        let bin = bins.entry(key).or_default();
+        for (sum, &channel) in bin.0.iter_mut().zip(&p.0) {
+            *sum += channel as u64;
+        }
+        bin.1 += 1;
+    }
+
+    // Hash maps iterate in random order; sorting keeps the result reproducible.
+    let mut bins: Vec<_> = bins.into_iter().collect();
+    bins.sort_unstable_by_key(|(key, _)| *key);
+    bins.into_iter()
+        .map(|(_, (sum, n))| {
+            let rgb = sum.map(|s| s as f32 / n as f32);
+            ColorPoint {
+                lab: linear_to_oklab(rgb.map(|c| srgb_to_linear(c / 255.0))),
+                rgb,
+                weight: (n as f32).powf(exponent),
+            }
+        })
+        .collect()
+}
+
+/// Splitmix64, for reproducible seeding without a dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next_unit(&mut self) -> f32 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        ((z ^ (z >> 31)) >> 40) as f32 / (1u32 << 24) as f32
+    }
+}
+
+fn distance_squared(a: &[f32; 3], b: &[f32; 3]) -> f32 {
+    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+}
+
+/// Picks an index with probability proportional to `scores`.
+fn pick_weighted(scores: &[f32], rng: &mut Rng) -> usize {
+    let total: f32 = scores.iter().sum();
+    let mut target = rng.next_unit() * total;
+    for (i, &s) in scores.iter().enumerate() {
+        if target < s {
+            return i;
+        }
+        target -= s;
+    }
+    scores.len() - 1
+}
+
+/// Adds `value * weight` to `sum`.
+fn add_scaled(sum: &mut [f32; 3], value: &[f32; 3], weight: f32) {
+    for (s, v) in sum.iter_mut().zip(value) {
+        *s += v * weight;
+    }
+}
+
+fn kmeans(points: &[ColorPoint], k: usize) -> Vec<[u8; 3]> {
+    const MAX_ITERATIONS: usize = 40;
+    let mut rng = Rng(0x5eed);
+
+    // k-means++ seeding: each new center is likely to be far from the existing ones.
+    let weights: Vec<f32> = points.iter().map(|p| p.weight).collect();
+    let mut centers = vec![points[pick_weighted(&weights, &mut rng)].lab];
+    let mut nearest: Vec<f32> = points
+        .iter()
+        .map(|p| distance_squared(&p.lab, &centers[0]))
+        .collect();
+    while centers.len() < k {
+        let scores: Vec<f32> = points
+            .iter()
+            .zip(&nearest)
+            .map(|(p, d)| p.weight * d)
+            .collect();
+        if scores.iter().sum::<f32>() <= 0.0 {
+            break;
+        }
+        let center = points[pick_weighted(&scores, &mut rng)].lab;
+        for (p, d) in points.iter().zip(nearest.iter_mut()) {
+            *d = d.min(distance_squared(&p.lab, &center));
+        }
+        centers.push(center);
+    }
+
+    let mut assignment = vec![usize::MAX; points.len()];
+    for _ in 0..MAX_ITERATIONS {
+        let mut changed = false;
+        let mut cost = vec![0.0f32; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            let (best, dist) = centers
+                .iter()
+                .map(|c| distance_squared(&p.lab, c))
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            cost[i] = p.weight * dist;
+            if assignment[i] != best {
+                assignment[i] = best;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+
+        let mut sums = vec![[0.0f32; 3]; centers.len()];
+        let mut totals = vec![0.0f32; centers.len()];
+        for (p, &a) in points.iter().zip(&assignment) {
+            add_scaled(&mut sums[a], &p.lab, p.weight);
+            totals[a] += p.weight;
+        }
+        for (i, center) in centers.iter_mut().enumerate() {
+            if totals[i] > 0.0 {
+                *center = sums[i].map(|s| s / totals[i]);
+            } else {
+                // An empty cluster restarts at the worst-served point.
+                let worst = (0..points.len())
+                    .max_by(|&a, &b| cost[a].total_cmp(&cost[b]))
+                    .unwrap();
+                *center = points[worst].lab;
+                cost[worst] = 0.0;
+            }
+        }
+    }
+
+    let mut sums = vec![[0.0f32; 3]; centers.len()];
+    let mut totals = vec![0.0f32; centers.len()];
+    for (p, &a) in points.iter().zip(&assignment) {
+        add_scaled(&mut sums[a], &p.rgb, p.weight);
+        totals[a] += p.weight;
+    }
+    sums.iter()
+        .zip(&totals)
+        .filter(|(_, t)| **t > 0.0)
+        .map(|(s, t)| s.map(|v| (v / t).round().clamp(0.0, 255.0) as u8))
+        .collect()
 }
 
 pub fn presets() -> Vec<(&'static str, Palette)> {
@@ -486,17 +617,87 @@ mod tests {
                 img.put_pixel(x, y, Rgba([20, 20, 200, 255]));
             }
         }
-        let p = Palette::extract(&img, 2);
+        let p = Palette::extract(&img, 2, 0.5);
         assert_eq!(p.colors.len(), 2);
         assert!(p.colors.contains(&[200, 30, 30]));
         assert!(p.colors.contains(&[20, 20, 200]));
     }
 
+    /// About 90% shades of one blue, plus small red, green and yellow patches.
+    fn mostly_blue_image() -> RgbaImage {
+        RgbaImage::from_fn(100, 100, |x, y| {
+            let i = x + y * 100;
+            if i < 9_000 {
+                let (r, g, b) = (20 + i % 7, 60 + i % 11, 200 + i % 40);
+                Rgba([r as u8, g as u8, b as u8, 255])
+            } else if i < 9_330 {
+                Rgba([200, 30, 30, 255])
+            } else if i < 9_660 {
+                Rgba([30, 200, 30, 255])
+            } else {
+                Rgba([230, 220, 40, 255])
+            }
+        })
+    }
+
+    #[test]
+    fn extract_does_not_waste_colors_on_shades_of_a_dominant_color() {
+        let colors = Palette::extract(&mostly_blue_image(), 4, 0.5).colors;
+        let count = |f: fn(&[u8; 3]) -> bool| colors.iter().filter(|c| f(c)).count();
+        assert_eq!(colors.len(), 4, "{colors:?}");
+        assert_eq!(count(|c| c[2] > 150 && c[0] < 80), 1, "blue in {colors:?}");
+        assert_eq!(
+            count(|c| c[0] > 150 && c[1] < 100 && c[2] < 100),
+            1,
+            "red in {colors:?}"
+        );
+        assert_eq!(
+            count(|c| c[1] > 150 && c[0] < 100 && c[2] < 100),
+            1,
+            "green in {colors:?}"
+        );
+        assert_eq!(
+            count(|c| c[0] > 180 && c[1] > 180 && c[2] < 120),
+            1,
+            "yellow in {colors:?}"
+        );
+    }
+
+    #[test]
+    fn extract_is_reproducible() {
+        let img = mostly_blue_image();
+        assert_eq!(
+            Palette::extract(&img, 6, 0.3),
+            Palette::extract(&img, 6, 0.3)
+        );
+    }
+
+    #[test]
+    fn extract_returns_the_requested_count_at_any_variety() {
+        let img = RgbaImage::from_fn(64, 64, |x, y| {
+            Rgba([(x * 4) as u8, (y * 4) as u8, ((x ^ y) * 4) as u8, 255])
+        });
+        for variety in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                Palette::extract(&img, 12, variety).colors.len(),
+                12,
+                "variety {variety}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_ignores_transparent_pixels() {
+        let mut img = RgbaImage::from_pixel(8, 8, Rgba([255, 0, 0, 0]));
+        img.put_pixel(0, 0, Rgba([0, 0, 255, 255]));
+        assert_eq!(Palette::extract(&img, 3, 0.5).colors, vec![[0, 0, 255]]);
+    }
+
     #[test]
     fn extract_respects_count_and_unique_colors() {
         let img = RgbaImage::from_fn(32, 32, |x, y| Rgba([(x * 8) as u8, (y * 8) as u8, 0, 255]));
-        assert!(Palette::extract(&img, 8).colors.len() <= 8);
+        assert!(Palette::extract(&img, 8, 0.5).colors.len() <= 8);
         let flat = RgbaImage::from_pixel(4, 4, Rgba([9, 9, 9, 255]));
-        assert_eq!(Palette::extract(&flat, 5).colors, vec![[9, 9, 9]]);
+        assert_eq!(Palette::extract(&flat, 5, 0.5).colors, vec![[9, 9, 9]]);
     }
 }

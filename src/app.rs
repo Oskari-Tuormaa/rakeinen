@@ -6,6 +6,7 @@ use image::RgbaImage;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::engine;
 use crate::engine::kernels::{BuiltinKernel, Kernel};
 use crate::engine::noise::NoiseKind;
 use crate::engine::ordered::{Matrix, OrderedPreset};
@@ -73,6 +74,7 @@ pub struct RakeinenApp {
     kernel_choice: Option<BuiltinKernel>,
     matrix_choice: Option<OrderedPreset>,
     extract_count: usize,
+    extract_variety: f32,
     show_original: bool,
 }
 
@@ -134,6 +136,7 @@ impl RakeinenApp {
             kernel_choice: Some(BuiltinKernel::FloydSteinberg),
             matrix_choice: Some(OrderedPreset::Bayer8),
             extract_count: 8,
+            extract_variety: 0.5,
             show_original: false,
         }
     }
@@ -425,6 +428,7 @@ impl RakeinenApp {
             ui,
             &mut self.settings.palette,
             &mut self.extract_count,
+            &mut self.extract_variety,
             can_extract,
         );
         match action {
@@ -433,7 +437,9 @@ impl RakeinenApp {
             PaletteAction::Export => self.export_palette(),
             PaletteAction::Extract => {
                 if let Some(src) = &self.source {
-                    self.settings.palette = Palette::extract(&src.pixels, self.extract_count);
+                    let prepared = engine::preprocessed(&src.pixels, &self.settings);
+                    self.settings.palette =
+                        Palette::extract(&prepared, self.extract_count, self.extract_variety);
                 }
             }
         }
