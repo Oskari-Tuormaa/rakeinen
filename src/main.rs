@@ -1,6 +1,7 @@
 mod app;
 mod engine;
 mod ui;
+mod worker;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -12,6 +13,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Rakeinen",
         options,
-        Box::new(|_cc| Ok(Box::new(app::RakeinenApp::default()))),
+        Box::new(|cc| Ok(Box::new(app::RakeinenApp::new(cc.egui_ctx.clone())))),
     )
 }

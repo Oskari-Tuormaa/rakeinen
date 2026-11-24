@@ -1,9 +1,14 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
 
+use crate::engine::Settings;
+use crate::engine::kernels::BuiltinKernel;
+use crate::engine::palette;
 use crate::ui::viewer::Viewer;
+use crate::worker::Worker;
 
 const PREVIEW_TEXTURE: TextureOptions = TextureOptions {
     magnification: egui::TextureFilter::Nearest,
@@ -14,19 +19,44 @@ const PREVIEW_TEXTURE: TextureOptions = TextureOptions {
 
 struct SourceImage {
     name: String,
-    #[allow(dead_code)]
-    pixels: RgbaImage,
+    pixels: Arc<RgbaImage>,
     texture: TextureHandle,
 }
 
-#[derive(Default)]
 pub struct RakeinenApp {
     source: Option<SourceImage>,
+    result: Option<TextureHandle>,
     viewer: Viewer,
     error: Option<String>,
+    worker: Worker,
+    settings: Settings,
+    submitted: Option<Settings>,
+    pending: Option<u64>,
+    kernel_choice: Option<BuiltinKernel>,
+    show_original: bool,
+}
+
+fn to_color_image(img: &RgbaImage) -> ColorImage {
+    let size = [img.width() as usize, img.height() as usize];
+    ColorImage::from_rgba_unmultiplied(size, img.as_raw())
 }
 
 impl RakeinenApp {
+    pub fn new(ctx: egui::Context) -> Self {
+        Self {
+            source: None,
+            result: None,
+            viewer: Viewer::default(),
+            error: None,
+            worker: Worker::spawn(ctx),
+            settings: Settings::default(),
+            submitted: None,
+            pending: None,
+            kernel_choice: Some(BuiltinKernel::FloydSteinberg),
+            show_original: false,
+        }
+    }
+
     fn open_dialog(&mut self, ctx: &egui::Context) {
         let file = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
@@ -40,21 +70,94 @@ impl RakeinenApp {
         match image::open(path) {
             Ok(img) => {
                 let pixels = img.to_rgba8();
-                let size = [pixels.width() as usize, pixels.height() as usize];
-                let color_image = ColorImage::from_rgba_unmultiplied(size, pixels.as_raw());
-                let texture = ctx.load_texture("source", color_image, PREVIEW_TEXTURE);
+                let texture = ctx.load_texture("source", to_color_image(&pixels), PREVIEW_TEXTURE);
                 self.source = Some(SourceImage {
                     name: path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default(),
-                    pixels,
+                    pixels: Arc::new(pixels),
                     texture,
                 });
+                self.result = None;
+                self.submitted = None;
+                self.pending = None;
+                self.worker.cancel();
                 self.viewer.request_fit();
                 self.error = None;
             }
             Err(e) => self.error = Some(format!("Failed to open {}: {e}", path.display())),
+        }
+    }
+
+    fn sync_worker(&mut self, ctx: &egui::Context) {
+        let Some(source) = &self.source else { return };
+
+        if self.submitted.as_ref() != Some(&self.settings) {
+            let generation = self
+                .worker
+                .submit(source.pixels.clone(), self.settings.clone());
+            self.pending = Some(generation);
+            self.submitted = Some(self.settings.clone());
+        }
+
+        if let Some(output) = self.worker.poll() {
+            let image = to_color_image(&output.image);
+            match &mut self.result {
+                Some(tex) => tex.set(image, PREVIEW_TEXTURE),
+                None => self.result = Some(ctx.load_texture("result", image, PREVIEW_TEXTURE)),
+            }
+            if self.pending == Some(output.generation) {
+                self.pending = None;
+            }
+        }
+    }
+
+    fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Error diffusion");
+        ui.add_space(4.0);
+
+        let kernel_label = self.kernel_choice.map_or("Custom", BuiltinKernel::name);
+        egui::ComboBox::from_label("Kernel")
+            .selected_text(kernel_label)
+            .show_ui(ui, |ui| {
+                for builtin in BuiltinKernel::ALL {
+                    let selected = self.kernel_choice == Some(builtin);
+                    if ui.selectable_label(selected, builtin.name()).clicked() {
+                        self.kernel_choice = Some(builtin);
+                        self.settings.kernel = builtin.kernel();
+                    }
+                }
+            });
+
+        ui.checkbox(&mut self.settings.serpentine, "Serpentine scan");
+        ui.add(egui::Slider::new(&mut self.settings.strength, 0.0..=1.5).text("Error strength"));
+
+        ui.separator();
+        ui.heading("Palette");
+        let presets = palette::presets();
+        let current = presets
+            .iter()
+            .find(|(_, p)| *p == self.settings.palette)
+            .map_or("Custom", |(name, _)| *name);
+        egui::ComboBox::from_label("Preset")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for (name, palette) in presets {
+                    let selected = palette == self.settings.palette;
+                    if ui.selectable_label(selected, name).clicked() {
+                        self.settings.palette = palette;
+                    }
+                }
+            });
+
+        ui.separator();
+        ui.checkbox(&mut self.show_original, "Show original");
+        if self.pending.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Dithering…");
+            });
         }
     }
 }
@@ -67,6 +170,8 @@ impl eframe::App for RakeinenApp {
         if let Some(path) = dropped {
             self.load(&ctx, &path);
         }
+
+        self.sync_worker(&ctx);
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -88,8 +193,16 @@ impl eframe::App for RakeinenApp {
             });
         });
 
+        egui::Panel::left("settings").show(ui, |ui| self.settings_panel(ui));
+
         egui::CentralPanel::default().show(ui, |ui| match &self.source {
-            Some(src) => self.viewer.show(ui, &src.texture),
+            Some(src) => {
+                let texture = match (&self.result, self.show_original) {
+                    (Some(result), false) => result,
+                    _ => &src.texture,
+                };
+                self.viewer.show(ui, texture);
+            }
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.label("Open or drop an image to begin");
