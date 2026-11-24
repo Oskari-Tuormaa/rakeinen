@@ -7,8 +7,17 @@ use image::RgbaImage;
 
 use crate::engine::{self, Region, Settings};
 
+/// How far through the pipeline a job should go.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stage {
+    /// Only the preprocessing, without dithering.
+    Preprocessed,
+    Dithered,
+}
+
 pub struct Output {
     pub generation: u64,
+    pub stage: Stage,
     /// The processed pixels of `region`.
     pub image: RgbaImage,
     pub region: Region,
@@ -21,6 +30,7 @@ pub struct Output {
 
 struct Job {
     generation: u64,
+    stage: Stage,
     source: Arc<RgbaImage>,
     settings: Settings,
     region: Option<Region>,
@@ -57,6 +67,7 @@ impl Worker {
                 if let Some(image) = processed {
                     let output = Output {
                         generation: job.generation,
+                        stage: job.stage,
                         image,
                         region,
                         full: region.covers(w, h),
@@ -79,17 +90,19 @@ impl Worker {
     }
 
     /// Queues a job and returns its generation, superseding any earlier job. With a `region`,
-    /// only that part of the processed image is computed.
+    /// only that part of the dithered image is computed; it is ignored for preprocessing.
     pub fn submit(
         &mut self,
         source: Arc<RgbaImage>,
         settings: Settings,
+        stage: Stage,
         region: Option<Region>,
     ) -> u64 {
         self.generation += 1;
         self.latest.store(self.generation, Ordering::Relaxed);
         let _ = self.jobs.send(Job {
             generation: self.generation,
+            stage,
             source,
             settings,
             region,

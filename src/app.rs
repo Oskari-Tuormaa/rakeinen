@@ -12,15 +12,14 @@ use crate::engine::kernels::{BuiltinKernel, Kernel};
 use crate::engine::noise::NoiseKind;
 use crate::engine::ordered::{Matrix, OrderedPreset};
 use crate::engine::palette::{self, Metric, Palette};
-use crate::engine::preprocess::PreprocessSettings;
-use crate::engine::preprocess::output_size;
+use crate::engine::preprocess::{PreprocessSettings, output_size};
 use crate::engine::{MethodKind, Region, Settings};
 use crate::export;
 use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
 use crate::ui::viewer::{Layer, Viewer};
 use crate::ui::{kernel_editor, matrix_editor};
-use crate::worker::{Output, Worker};
+use crate::worker::{Output, Stage, Worker};
 
 const TEXTURE_OPTIONS: TextureOptions = TextureOptions {
     magnification: egui::TextureFilter::Nearest,
@@ -33,6 +32,32 @@ const TEXTURE_OPTIONS: TextureOptions = TextureOptions {
 const REGION_MIN_PIXELS: u64 = 1_500_000;
 /// Extra processed pixels dithered around the visible area while dragging.
 const REGION_PADDING: f32 = 8.0;
+
+/// Which stage of the pipeline is shown in the viewer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Original,
+    Preprocessed,
+    Dithered,
+}
+
+impl ViewMode {
+    const ALL: [ViewMode; 3] = [Self::Original, Self::Preprocessed, Self::Dithered];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original",
+            Self::Preprocessed => "Preprocessed",
+            Self::Dithered => "Dithered",
+        }
+    }
+}
+
+/// What the newest worker job was computed from, to tell whether it is out of date.
+enum JobKey {
+    Preprocessed(PreprocessSettings),
+    Dithered(Settings),
+}
 
 /// A dithered texture and where it belongs in the image.
 struct ResultLayer {
@@ -65,11 +90,13 @@ pub struct RakeinenApp {
     result: Option<ResultLayer>,
     /// Just the visible part, shown on top of `result` while dragging a setting.
     region_result: Option<ResultLayer>,
+    /// The image after preprocessing, before dithering.
+    prepared: Option<ResultLayer>,
     viewer: Viewer,
     error: Option<String>,
     worker: Worker,
     settings: Settings,
-    submitted: Option<Settings>,
+    submitted: Option<JobKey>,
     /// Whether the newest job covers only part of the image, so a full pass is still owed.
     submitted_partial: bool,
     pending: Option<u64>,
@@ -82,7 +109,7 @@ pub struct RakeinenApp {
     /// Receives the outcome of a PNG export running on a background thread.
     export_job: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     status: Option<String>,
-    show_original: bool,
+    view_mode: ViewMode,
 }
 
 /// The processed-image region covering `visible` (in original-image pixels) plus some padding.
@@ -133,6 +160,7 @@ impl RakeinenApp {
             source: None,
             result: None,
             region_result: None,
+            prepared: None,
             viewer: Viewer::default(),
             error: None,
             worker: Worker::spawn(ctx),
@@ -148,7 +176,7 @@ impl RakeinenApp {
             export_scale: 1,
             export_job: None,
             status: None,
-            show_original: false,
+            view_mode: ViewMode::Dithered,
         }
     }
 
@@ -176,6 +204,7 @@ impl RakeinenApp {
                 });
                 self.result = None;
                 self.region_result = None;
+                self.prepared = None;
                 self.status = None;
                 self.submitted = None;
                 self.submitted_partial = false;
@@ -351,29 +380,58 @@ impl RakeinenApp {
         (region.area() * 10 < total * 7).then_some(region)
     }
 
+    /// Whether the newest worker job already reflects the current settings for `stage`.
+    fn job_is_current(&self, stage: Stage) -> bool {
+        match (&self.submitted, stage) {
+            (Some(JobKey::Preprocessed(p)), Stage::Preprocessed) => *p == self.settings.preprocess,
+            (Some(JobKey::Dithered(s)), Stage::Dithered) => *s == self.settings,
+            _ => false,
+        }
+    }
+
     fn sync_worker(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.source else { return };
 
-        // While a pointer button is held (slider drags), large images only get the visible area
-        // dithered, and one full pass follows on release.
-        let dragging = ctx.input(|i| i.pointer.any_down());
-        let region = if dragging { self.drag_region() } else { None };
-        let changed = self.submitted.as_ref() != Some(&self.settings);
-        if changed || (self.submitted_partial && region.is_none()) {
-            let generation =
-                self.worker
-                    .submit(source.pixels.clone(), self.settings.clone(), region);
-            self.pending = Some(generation);
-            self.submitted = Some(self.settings.clone());
-            self.submitted_partial = region.is_some();
+        // The original needs no work, and the other views only compute what they show.
+        let stage = match self.view_mode {
+            ViewMode::Original => None,
+            ViewMode::Preprocessed => Some(Stage::Preprocessed),
+            ViewMode::Dithered => Some(Stage::Dithered),
+        };
+        if let Some(stage) = stage {
+            // While a pointer button is held (slider drags), large images only get the visible
+            // area dithered, and one full pass follows on release.
+            let dragging = ctx.input(|i| i.pointer.any_down());
+            let region = if dragging && stage == Stage::Dithered {
+                self.drag_region()
+            } else {
+                None
+            };
+            if !self.job_is_current(stage) || (self.submitted_partial && region.is_none()) {
+                let generation =
+                    self.worker
+                        .submit(source.pixels.clone(), self.settings.clone(), stage, region);
+                self.pending = Some(generation);
+                self.submitted = Some(match stage {
+                    Stage::Preprocessed => JobKey::Preprocessed(self.settings.preprocess.clone()),
+                    Stage::Dithered => JobKey::Dithered(self.settings.clone()),
+                });
+                self.submitted_partial = region.is_some();
+            }
         }
 
         if let Some(output) = self.worker.poll() {
-            if output.full {
-                update_layer(ctx, &mut self.result, "result", &output);
-                self.region_result = None;
-            } else {
-                update_layer(ctx, &mut self.region_result, "region", &output);
+            match (output.stage, output.full) {
+                (Stage::Preprocessed, _) => {
+                    update_layer(ctx, &mut self.prepared, "prepared", &output);
+                }
+                (Stage::Dithered, true) => {
+                    update_layer(ctx, &mut self.result, "result", &output);
+                    self.region_result = None;
+                }
+                (Stage::Dithered, false) => {
+                    update_layer(ctx, &mut self.region_result, "region", &output);
+                }
             }
             if self.pending == Some(output.generation) {
                 self.pending = None;
@@ -409,11 +467,10 @@ impl RakeinenApp {
         self.palette_controls(ui);
 
         ui.separator();
-        ui.checkbox(&mut self.show_original, "Show original");
         if self.pending.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Dithering…");
+                ui.label("Processing…");
             });
         } else if self.region_result.is_some() {
             ui.label("Showing the visible area only while dragging");
@@ -679,6 +736,13 @@ impl eframe::App for RakeinenApp {
                         self.viewer.request_actual_size();
                     }
                 });
+                ui.separator();
+                ui.add_enabled_ui(self.source.is_some(), |ui| {
+                    for mode in ViewMode::ALL {
+                        ui.selectable_value(&mut self.view_mode, mode, mode.label());
+                    }
+                });
+                ui.separator();
                 if let Some(src) = &self.source {
                     ui.label(format!(
                         "{} — {}×{} — {:.0}%",
@@ -718,18 +782,25 @@ impl eframe::App for RakeinenApp {
             Some(src) => {
                 let image_size = src.texture.size_vec2();
                 let mut layers = Vec::new();
-                if self.show_original || self.result.is_none() {
+                let shown: Vec<&ResultLayer> = match self.view_mode {
+                    ViewMode::Original => Vec::new(),
+                    ViewMode::Preprocessed => self.prepared.iter().collect(),
+                    ViewMode::Dithered => [&self.result, &self.region_result]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                };
+                if shown.is_empty() {
                     layers.push(Layer {
                         texture: &src.texture,
                         rect: Rect::from_min_size(Pos2::ZERO, image_size),
                     });
-                } else {
-                    for layer in [&self.result, &self.region_result].into_iter().flatten() {
-                        layers.push(Layer {
-                            texture: &layer.texture,
-                            rect: layer.image_rect(),
-                        });
-                    }
+                }
+                for layer in shown {
+                    layers.push(Layer {
+                        texture: &layer.texture,
+                        rect: layer.image_rect(),
+                    });
                 }
                 self.viewer.show(ui, image_size, &layers);
             }
