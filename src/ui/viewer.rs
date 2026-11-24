@@ -1,9 +1,17 @@
+use eframe::egui::emath::GuiRounding;
 use eframe::egui::{self, Color32, Rect, Sense, TextureHandle, Vec2, pos2};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewRequest {
+    None,
+    Fit,
+    ActualSize,
+}
 
 pub struct Viewer {
     zoom: f32,
     pan: Vec2,
-    fit: bool,
+    request: ViewRequest,
 }
 
 impl Default for Viewer {
@@ -11,28 +19,43 @@ impl Default for Viewer {
         Self {
             zoom: 1.0,
             pan: Vec2::ZERO,
-            fit: true,
+            request: ViewRequest::Fit,
         }
     }
 }
 
 impl Viewer {
     pub fn request_fit(&mut self) {
-        self.fit = true;
+        self.request = ViewRequest::Fit;
     }
 
-    pub fn zoom(&self) -> f32 {
-        self.zoom
+    /// Shows one image pixel per physical screen pixel.
+    pub fn request_actual_size(&mut self) {
+        self.request = ViewRequest::ActualSize;
+    }
+
+    /// Current magnification where 1.0 means one image pixel per physical screen pixel.
+    pub fn scale(&self, pixels_per_point: f32) -> f32 {
+        self.zoom * pixels_per_point
     }
 
     /// Draws `texture` stretched to `image_size`, which may differ from the texture's own size.
     pub fn show(&mut self, ui: &mut egui::Ui, texture: &TextureHandle, image_size: Vec2) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
 
-        if self.fit || response.double_clicked() {
-            self.zoom = (rect.width() / image_size.x).min(rect.height() / image_size.y);
-            self.pan = Vec2::ZERO;
-            self.fit = false;
+        if response.double_clicked() {
+            self.request = ViewRequest::Fit;
+        }
+        match std::mem::replace(&mut self.request, ViewRequest::None) {
+            ViewRequest::None => {}
+            ViewRequest::Fit => {
+                self.zoom = (rect.width() / image_size.x).min(rect.height() / image_size.y);
+                self.pan = Vec2::ZERO;
+            }
+            ViewRequest::ActualSize => {
+                self.zoom = 1.0 / ui.ctx().pixels_per_point();
+                self.pan = Vec2::ZERO;
+            }
         }
 
         if response.hovered() {
@@ -53,6 +76,10 @@ impl Viewer {
 
         let image_rect = Rect::from_center_size(rect.center() + self.pan, image_size * self.zoom);
         let painter = ui.painter_at(rect);
+        let image_rect = Rect::from_min_size(
+            image_rect.min.round_to_pixels(ui.ctx().pixels_per_point()),
+            image_rect.size(),
+        );
         painter.rect_filled(rect, 0.0, Color32::from_gray(24));
         painter.image(
             texture.id(),

@@ -438,13 +438,29 @@ impl eframe::App for RakeinenApp {
                 if ui.button("Open…").clicked() {
                     self.open_dialog(&ctx);
                 }
+                ui.add_enabled_ui(self.source.is_some(), |ui| {
+                    if ui
+                        .button("Fit")
+                        .on_hover_text("Fit the image in the window (or double-click)")
+                        .clicked()
+                    {
+                        self.viewer.request_fit();
+                    }
+                    if ui
+                        .button("1:1")
+                        .on_hover_text("Show one image pixel per screen pixel")
+                        .clicked()
+                    {
+                        self.viewer.request_actual_size();
+                    }
+                });
                 if let Some(src) = &self.source {
                     ui.label(format!(
                         "{} — {}×{} — {:.0}%",
                         src.name,
                         src.texture.size()[0],
                         src.texture.size()[1],
-                        self.viewer.zoom() * 100.0
+                        self.viewer.scale(ctx.pixels_per_point()) * 100.0
                     ));
                     if let Some(result) = &self.result {
                         let size = result.size();
