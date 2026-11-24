@@ -23,7 +23,7 @@ const TEXTURE_OPTIONS: TextureOptions = TextureOptions {
     magnification: egui::TextureFilter::Nearest,
     minification: egui::TextureFilter::Linear,
     wrap_mode: egui::TextureWrapMode::ClampToEdge,
-    mipmap_mode: None,
+    mipmap_mode: Some(egui::TextureFilter::Linear),
 };
 
 /// Below this many processed pixels the whole image is always dithered, because it is quick.
