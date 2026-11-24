@@ -4,12 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.37.0"
+eframe = { version = "0.37.0", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "system_fonts",
+    "wayland",
+    "web_screen_reader",
+    "x11",
+] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 rayon = "1.12.0"
 rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# Not used directly: this keeps winit's default features (Wayland dlopen and decorations) that
+# eframe's default feature set would otherwise enable, now that wgpu is switched for glow.
+winit = "0.30.13"
 
 [profile.dev]
 opt-level = 1

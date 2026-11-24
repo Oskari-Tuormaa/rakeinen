@@ -17,7 +17,6 @@
           wayland
           libxkbcommon
           libGL
-          vulkan-loader
           libx11
           libxcursor
           libxi
