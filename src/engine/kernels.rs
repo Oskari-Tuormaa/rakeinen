@@ -1,9 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 /// An error diffusion kernel stored as a grid, as shown in the kernel editor.
 ///
 /// Row 0 is the current scanline and the current pixel sits at column `cols / 2`.
 /// Only cells that come after the current pixel in scan order carry meaning: the cells to
 /// the right of the center in row 0, and every cell in the rows below.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Kernel {
     pub cols: usize,
     pub rows: usize,
@@ -69,6 +71,39 @@ impl Kernel {
 
     pub fn forward_sum(&self) -> f32 {
         self.taps().iter().map(|t| t.weight).sum()
+    }
+
+    /// Resizes the grid keeping every weight at the same offset from the center pixel.
+    /// `cols` is rounded up to an odd number so the center column stays well defined.
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        let rows = rows.max(1);
+        let cols = (cols.max(1)) | 1;
+        let mut weights = vec![0.0; rows * cols];
+        let new_center = cols / 2;
+        for y in 0..self.rows.min(rows) {
+            for x in 0..self.cols {
+                let nx = x as i32 - self.center() as i32 + new_center as i32;
+                if nx >= 0 && (nx as usize) < cols {
+                    weights[y * cols + nx as usize] = self.weights[y * self.cols + x];
+                }
+            }
+        }
+        self.rows = rows;
+        self.cols = cols;
+        self.weights = weights;
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.rows == 0 || self.cols == 0 || self.cols % 2 == 0 {
+            return Err("kernel needs at least one row and an odd number of columns".into());
+        }
+        if self.weights.len() != self.rows * self.cols {
+            return Err("kernel weight count does not match its size".into());
+        }
+        if !self.divisor.is_finite() || self.divisor == 0.0 {
+            return Err("kernel divisor must be a non-zero number".into());
+        }
+        Ok(())
     }
 }
 
@@ -177,6 +212,42 @@ mod tests {
         assert_eq!(taps.len(), 4);
         assert!(taps.iter().any(|t| t.dx == 1 && t.dy == 0));
         assert!(taps.iter().any(|t| t.dx == -1 && t.dy == 1));
+    }
+
+    #[test]
+    fn resize_keeps_weights_relative_to_center() {
+        let mut k = BuiltinKernel::FloydSteinberg.kernel();
+        let before = k.taps();
+        k.resize(3, 7);
+        assert_eq!((k.rows, k.cols), (3, 7));
+        let mut after = k.taps();
+        let mut before = before;
+        let key = |t: &Tap| (t.dy, t.dx);
+        before.sort_by_key(key);
+        after.sort_by_key(key);
+        assert_eq!(before.len(), after.len());
+        for (a, b) in before.iter().zip(&after) {
+            assert_eq!(key(a), key(b));
+            assert!((a.weight - b.weight).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn resize_forces_odd_columns() {
+        let mut k = BuiltinKernel::Burkes.kernel();
+        k.resize(2, 4);
+        assert_eq!(k.cols, 5);
+    }
+
+    #[test]
+    fn validate_rejects_bad_kernels() {
+        let mut k = BuiltinKernel::Atkinson.kernel();
+        assert!(k.validate().is_ok());
+        k.divisor = 0.0;
+        assert!(k.validate().is_err());
+        k.divisor = 8.0;
+        k.weights.pop();
+        assert!(k.validate().is_err());
     }
 
     #[test]
