@@ -1,3 +1,23 @@
+# Rust
 /target
-.direnv/
+**/*.rs.bk
+
+# Nix
 result
+result-*
+.direnv/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local scratch and test output
+/tmp/
+*.log
