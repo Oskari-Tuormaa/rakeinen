@@ -200,15 +200,22 @@ pub struct OrderedParams<'a> {
     pub spread: f32,
 }
 
-/// Runs ordered dithering. Returns `None` if `cancelled` reports true.
-pub fn dither(src: &RgbaImage, params: &OrderedParams, cancelled: Cancel) -> Option<RgbaImage> {
+/// Runs ordered dithering. `origin` is the position of `src` inside the full image, so that a
+/// region gets the same thresholds it would have in a full run. Returns `None` if `cancelled`
+/// reports true.
+pub fn dither(
+    src: &RgbaImage,
+    params: &OrderedParams,
+    origin: (usize, usize),
+    cancelled: Cancel,
+) -> Option<RgbaImage> {
     if !params.matrix.is_well_formed() {
         return Some(src.clone());
     }
     let thresholds = params.matrix.thresholds();
     let (mw, mh) = (params.matrix.width, params.matrix.height);
     dither_with(src, params.quantizer, params.spread, cancelled, |x, y| {
-        thresholds[(y % mh) * mw + x % mw]
+        thresholds[((y + origin.1) % mh) * mw + (x + origin.0) % mw]
     })
 }
 
@@ -265,7 +272,7 @@ mod tests {
             quantizer: &quantizer,
             spread: 1.0,
         };
-        dither(img, &params, &|| false).unwrap()
+        dither(img, &params, (0, 0), &|| false).unwrap()
     }
 
     fn is_permutation(m: &Matrix) -> bool {
@@ -349,6 +356,6 @@ mod tests {
             quantizer: &q,
             spread: 1.0,
         };
-        assert!(dither(&gray_image(4, 4, 10), &params, &|| true).is_none());
+        assert!(dither(&gray_image(4, 4, 10), &params, (0, 0), &|| true).is_none());
     }
 }

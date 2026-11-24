@@ -34,12 +34,18 @@ pub struct NoiseParams<'a> {
     pub seed: u32,
 }
 
-pub fn dither(src: &RgbaImage, params: &NoiseParams, cancelled: Cancel) -> Option<RgbaImage> {
+/// `origin` is the position of `src` inside the full image, so a region matches a full run.
+pub fn dither(
+    src: &RgbaImage,
+    params: &NoiseParams,
+    origin: (usize, usize),
+    cancelled: Cancel,
+) -> Option<RgbaImage> {
     match params.kind {
         NoiseKind::White => {
             let seed = params.seed;
             dither_with(src, params.quantizer, params.spread, cancelled, |x, y| {
-                white_threshold(x as u32, y as u32, seed)
+                white_threshold((x + origin.0) as u32, (y + origin.1) as u32, seed)
             })
         }
         NoiseKind::Blue => {
@@ -47,7 +53,7 @@ pub fn dither(src: &RgbaImage, params: &NoiseParams, cancelled: Cancel) -> Optio
             let thresholds = matrix.thresholds();
             let size = matrix.width;
             dither_with(src, params.quantizer, params.spread, cancelled, |x, y| {
-                thresholds[(y % size) * size + x % size]
+                thresholds[((y + origin.1) % size) * size + (x + origin.0) % size]
             })
         }
     }
@@ -188,7 +194,7 @@ mod tests {
             spread: 1.0,
             seed,
         };
-        dither(&gray_image(128, 128, v), &params, &|| false).unwrap()
+        dither(&gray_image(128, 128, v), &params, (0, 0), &|| false).unwrap()
     }
 
     fn white_ratio(img: &RgbaImage) -> f32 {

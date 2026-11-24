@@ -1,7 +1,9 @@
 use std::f32::consts::FRAC_PI_4;
 
 use image::RgbaImage;
-use image::imageops::{self, FilterType};
+use rayon::prelude::*;
+
+use super::Region;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct PreprocessSettings {
@@ -40,33 +42,70 @@ impl PreprocessSettings {
     }
 }
 
-/// Resizes and tone-adjusts `src`. The result is `pixel_size` times smaller in each dimension.
-pub fn preprocess(src: &RgbaImage, settings: &PreprocessSettings) -> RgbaImage {
-    let mut img = if settings.pixel_size > 1 {
-        let w = (src.width() / settings.pixel_size).max(1);
-        let h = (src.height() / settings.pixel_size).max(1);
-        imageops::resize(src, w, h, FilterType::Triangle)
-    } else {
-        src.clone()
-    };
-    if !settings.changes_tones() {
-        return img;
-    }
+/// Size of the preprocessed image: every `pixel_size` block of the source becomes one pixel.
+pub fn output_size(width: u32, height: u32, pixel_size: u32) -> (u32, u32) {
+    let ps = pixel_size.max(1);
+    ((width / ps).max(1), (height / ps).max(1))
+}
 
-    let curve = tone_curve(settings);
-    for p in img.pixels_mut() {
-        let [r, g, b] = if settings.grayscale {
-            let luma =
-                (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32).round() as u8;
-            [luma; 3]
-        } else {
-            [p[0], p[1], p[2]]
-        };
-        p[0] = curve[r as usize];
-        p[1] = curve[g as usize];
-        p[2] = curve[b as usize];
-    }
-    img
+/// Computes one rectangle of the preprocessed image. Every output pixel depends only on its
+/// own `pixel_size` block of the source, so a region is identical to the same area of the
+/// full result. `region` must lie inside [`output_size`].
+pub fn preprocess_region(
+    src: &RgbaImage,
+    settings: &PreprocessSettings,
+    region: Region,
+) -> RgbaImage {
+    let ps = settings.pixel_size.max(1) as usize;
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let (rw, rh) = (region.w as usize, region.h as usize);
+    let raw = src.as_raw();
+    let curve = settings.changes_tones().then(|| tone_curve(settings));
+
+    let mut out = vec![0u8; rw * rh * 4];
+    out.par_chunks_mut(rw * 4)
+        .enumerate()
+        .for_each(|(ry, row)| {
+            let y0 = (region.y as usize + ry) * ps;
+            let y1 = (y0 + ps).min(sh);
+            for (rx, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x0 = (region.x as usize + rx) * ps;
+                let x1 = (x0 + ps).min(sw);
+                *px = if ps == 1 {
+                    let i = (y0 * sw + x0) * 4;
+                    [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]
+                } else {
+                    let mut sum = [0u32; 4];
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let i = (y * sw + x) * 4;
+                            for c in 0..4 {
+                                sum[c] += raw[i + c] as u32;
+                            }
+                        }
+                    }
+                    let n = (((x1 - x0) * (y1 - y0)) as u32).max(1);
+                    sum.map(|s| ((s + n / 2) / n) as u8)
+                };
+                if let Some(curve) = &curve {
+                    apply_tone(px, curve, settings.grayscale);
+                }
+            }
+        });
+    RgbaImage::from_raw(region.w, region.h, out).expect("buffer matches region size")
+}
+
+fn apply_tone(px: &mut [u8; 4], curve: &[u8; 256], grayscale: bool) {
+    let [r, g, b] = if grayscale {
+        let luma =
+            (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32).round() as u8;
+        [luma; 3]
+    } else {
+        [px[0], px[1], px[2]]
+    };
+    px[0] = curve[r as usize];
+    px[1] = curve[g as usize];
+    px[2] = curve[b as usize];
 }
 
 fn tone_curve(s: &PreprocessSettings) -> [u8; 256] {
@@ -89,10 +128,15 @@ fn tone_curve(s: &PreprocessSettings) -> [u8; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::Rgba;
+    use image::{Rgba, imageops};
 
     fn sample() -> RgbaImage {
         RgbaImage::from_fn(8, 6, |x, y| Rgba([(x * 30) as u8, (y * 40) as u8, 90, 200]))
+    }
+
+    fn preprocess(src: &RgbaImage, settings: &PreprocessSettings) -> RgbaImage {
+        let (w, h) = output_size(src.width(), src.height(), settings.pixel_size);
+        preprocess_region(src, settings, Region::full(w, h))
     }
 
     #[test]
@@ -186,6 +230,22 @@ mod tests {
     }
 
     #[test]
+    fn pixel_size_averages_each_block() {
+        let mut img = RgbaImage::new(2, 2);
+        for (i, v) in [0u8, 100, 200, 41].into_iter().enumerate() {
+            img.put_pixel(i as u32 % 2, i as u32 / 2, Rgba([v, v, v, 255]));
+        }
+        let out = preprocess(
+            &img,
+            &PreprocessSettings {
+                pixel_size: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.get_pixel(0, 0), &Rgba([85, 85, 85, 255]));
+    }
+
+    #[test]
     fn pixel_size_never_collapses_below_one_pixel() {
         let out = preprocess(
             &sample(),
@@ -195,5 +255,36 @@ mod tests {
             },
         );
         assert_eq!((out.width(), out.height()), (1, 1));
+    }
+
+    #[test]
+    fn region_matches_the_same_area_of_the_full_result() {
+        let img = RgbaImage::from_fn(37, 29, |x, y| {
+            Rgba([
+                (x * 7 % 256) as u8,
+                (y * 11 % 256) as u8,
+                ((x * y) % 256) as u8,
+                255,
+            ])
+        });
+        for pixel_size in [1, 3] {
+            let settings = PreprocessSettings {
+                pixel_size,
+                contrast: 0.3,
+                gamma: 1.4,
+                brightness: -0.1,
+                ..Default::default()
+            };
+            let full = preprocess(&img, &settings);
+            let region = Region {
+                x: 2,
+                y: 1,
+                w: 5,
+                h: 4,
+            };
+            let part = preprocess_region(&img, &settings, region);
+            let expected = imageops::crop_imm(&full, 2, 1, 5, 4).to_image();
+            assert_eq!(part, expected, "pixel size {pixel_size}");
+        }
     }
 }
