@@ -3,6 +3,7 @@ pub mod kernels;
 pub mod noise;
 pub mod ordered;
 pub mod palette;
+pub mod preprocess;
 
 use image::RgbaImage;
 
@@ -10,7 +11,8 @@ use diffusion::{DiffusionParams, diffuse};
 use kernels::{BuiltinKernel, Kernel};
 use noise::{NoiseKind, NoiseParams};
 use ordered::{Matrix, OrderedParams, OrderedPreset};
-use palette::Palette;
+use palette::{ColorSettings, Palette, Quantizer};
+use preprocess::{PreprocessSettings, preprocess};
 
 /// Reports whether the running job has been superseded and should stop early.
 pub type Cancel<'a> = &'a (dyn Fn() -> bool + Sync);
@@ -56,16 +58,19 @@ pub struct NoiseSettings {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
+    pub preprocess: PreprocessSettings,
     pub method: MethodKind,
     pub diffusion: DiffusionSettings,
     pub ordered: OrderedSettings,
     pub noise: NoiseSettings,
     pub palette: Palette,
+    pub color: ColorSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            preprocess: PreprocessSettings::default(),
             method: MethodKind::Diffusion,
             diffusion: DiffusionSettings {
                 kernel: BuiltinKernel::FloydSteinberg.kernel(),
@@ -82,18 +87,23 @@ impl Default for Settings {
                 seed: 0,
             },
             palette: Palette::black_white(),
+            color: ColorSettings::default(),
         }
     }
 }
 
-/// Dithers `src` with `settings`. Returns `None` if `cancelled` becomes true mid-run.
+/// Preprocesses and dithers `src` with `settings`. The result is `pixel_size` times smaller than
+/// `src` in each dimension. Returns `None` if `cancelled` becomes true mid-run.
 pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Option<RgbaImage> {
+    let prepared = preprocess(src, &settings.preprocess);
+    let src = &prepared;
+    let quantizer = Quantizer::new(&settings.palette, settings.color);
     match settings.method {
         MethodKind::Diffusion => diffuse(
             src,
             &DiffusionParams {
                 kernel: &settings.diffusion.kernel,
-                palette: &settings.palette,
+                quantizer: &quantizer,
                 serpentine: settings.diffusion.serpentine,
                 strength: settings.diffusion.strength,
             },
@@ -103,7 +113,7 @@ pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Optio
             src,
             &OrderedParams {
                 matrix: &settings.ordered.matrix,
-                palette: &settings.palette,
+                quantizer: &quantizer,
                 spread: settings.ordered.spread,
             },
             cancelled,
@@ -112,7 +122,7 @@ pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Optio
             src,
             &NoiseParams {
                 kind: settings.noise.kind,
-                palette: &settings.palette,
+                quantizer: &quantizer,
                 spread: settings.noise.spread,
                 seed: settings.noise.seed,
             },

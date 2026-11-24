@@ -4,7 +4,7 @@ use image::RgbaImage;
 
 use super::Cancel;
 use super::ordered::{Matrix, dither_with};
-use super::palette::Palette;
+use super::palette::Quantizer;
 
 const BLUE_NOISE_SIZE: usize = 64;
 const BLUE_NOISE_SIGMA: f32 = 1.5;
@@ -28,7 +28,7 @@ impl NoiseKind {
 
 pub struct NoiseParams<'a> {
     pub kind: NoiseKind,
-    pub palette: &'a Palette,
+    pub quantizer: &'a Quantizer,
     pub spread: f32,
     /// Only used by white noise.
     pub seed: u32,
@@ -38,7 +38,7 @@ pub fn dither(src: &RgbaImage, params: &NoiseParams, cancelled: Cancel) -> Optio
     match params.kind {
         NoiseKind::White => {
             let seed = params.seed;
-            dither_with(src, params.palette, params.spread, cancelled, |x, y| {
+            dither_with(src, params.quantizer, params.spread, cancelled, |x, y| {
                 white_threshold(x as u32, y as u32, seed)
             })
         }
@@ -46,7 +46,7 @@ pub fn dither(src: &RgbaImage, params: &NoiseParams, cancelled: Cancel) -> Optio
             let matrix = blue_noise_matrix();
             let thresholds = matrix.thresholds();
             let size = matrix.width;
-            dither_with(src, params.palette, params.spread, cancelled, |x, y| {
+            dither_with(src, params.quantizer, params.spread, cancelled, |x, y| {
                 thresholds[(y % size) * size + x % size]
             })
         }
@@ -173,6 +173,7 @@ fn generate_blue_noise(size: usize) -> Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::palette::{ColorSettings, Palette};
     use image::Rgba;
 
     fn gray_image(w: u32, h: u32, v: u8) -> RgbaImage {
@@ -180,10 +181,10 @@ mod tests {
     }
 
     fn run(kind: NoiseKind, v: u8, seed: u32) -> RgbaImage {
-        let palette = Palette::black_white();
+        let quantizer = Quantizer::new(&Palette::black_white(), ColorSettings::default());
         let params = NoiseParams {
             kind,
-            palette: &palette,
+            quantizer: &quantizer,
             spread: 1.0,
             seed,
         };

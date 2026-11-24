@@ -2,11 +2,11 @@ use image::{Rgba, RgbaImage};
 
 use super::Cancel;
 use super::kernels::{Kernel, Tap};
-use super::palette::Palette;
+use super::palette::Quantizer;
 
 pub struct DiffusionParams<'a> {
     pub kernel: &'a Kernel,
-    pub palette: &'a Palette,
+    pub quantizer: &'a Quantizer,
     pub serpentine: bool,
     pub strength: f32,
 }
@@ -15,7 +15,8 @@ pub struct DiffusionParams<'a> {
 pub fn diffuse(src: &RgbaImage, params: &DiffusionParams, cancelled: Cancel) -> Option<RgbaImage> {
     let (w, h) = (src.width() as usize, src.height() as usize);
     let mut out = src.clone();
-    if params.palette.is_empty() || w == 0 || h == 0 {
+    let q = params.quantizer;
+    if q.is_empty() || w == 0 || h == 0 {
         return Some(out);
     }
 
@@ -24,7 +25,7 @@ pub fn diffuse(src: &RgbaImage, params: &DiffusionParams, cancelled: Cancel) -> 
 
     let mut buf: Vec<[f32; 3]> = src
         .pixels()
-        .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+        .map(|p| q.to_working([p[0], p[1], p[2]]))
         .collect();
 
     for y in 0..h {
@@ -39,18 +40,20 @@ pub fn diffuse(src: &RgbaImage, params: &DiffusionParams, cancelled: Cancel) -> 
             let idx = y * w + x;
 
             let old = buf[idx].map(|v| v.clamp(0.0, 255.0));
-            let chosen = params.palette.colors[params.palette.nearest(old)];
+            let chosen = q.nearest(old);
+            let color = q.colors[chosen];
+            let target = q.working(chosen);
             let alpha = src.get_pixel(x as u32, y as u32)[3];
             out.put_pixel(
                 x as u32,
                 y as u32,
-                Rgba([chosen[0], chosen[1], chosen[2], alpha]),
+                Rgba([color[0], color[1], color[2], alpha]),
             );
 
             let err = [
-                (old[0] - chosen[0] as f32) * params.strength,
-                (old[1] - chosen[1] as f32) * params.strength,
-                (old[2] - chosen[2] as f32) * params.strength,
+                (old[0] - target[0]) * params.strength,
+                (old[1] - target[1]) * params.strength,
+                (old[2] - target[2]) * params.strength,
             ];
             for tap in taps {
                 let nx = x as i32 + tap.dx;
@@ -72,20 +75,35 @@ pub fn diffuse(src: &RgbaImage, params: &DiffusionParams, cancelled: Cancel) -> 
 mod tests {
     use super::*;
     use crate::engine::kernels::BuiltinKernel;
+    use crate::engine::palette::{ColorSettings, Palette};
 
     fn gray_image(w: u32, h: u32, v: u8) -> RgbaImage {
         RgbaImage::from_pixel(w, h, Rgba([v, v, v, 255]))
     }
 
-    fn run(img: &RgbaImage, palette: &Palette, serpentine: bool) -> RgbaImage {
+    fn run_with(
+        img: &RgbaImage,
+        palette: &Palette,
+        serpentine: bool,
+        color: ColorSettings,
+    ) -> RgbaImage {
         let kernel = BuiltinKernel::FloydSteinberg.kernel();
+        let quantizer = Quantizer::new(palette, color);
         let params = DiffusionParams {
             kernel: &kernel,
-            palette,
+            quantizer: &quantizer,
             serpentine,
             strength: 1.0,
         };
         diffuse(img, &params, &|| false).unwrap()
+    }
+
+    fn run(img: &RgbaImage, palette: &Palette, serpentine: bool) -> RgbaImage {
+        run_with(img, palette, serpentine, ColorSettings::default())
+    }
+
+    fn white_ratio(img: &RgbaImage) -> f32 {
+        img.pixels().filter(|p| p[0] == 255).count() as f32 / (img.width() * img.height()) as f32
     }
 
     #[test]
@@ -103,10 +121,26 @@ mod tests {
         let palette = Palette::black_white();
         for serpentine in [false, true] {
             let out = run(&gray_image(64, 64, 128), &palette, serpentine);
-            let white = out.pixels().filter(|p| p[0] == 255).count() as f32;
-            let ratio = white / (64.0 * 64.0);
+            let ratio = white_ratio(&out);
             assert!((ratio - 0.5).abs() < 0.02, "ratio {ratio}");
         }
+    }
+
+    #[test]
+    fn linear_light_preserves_physical_brightness() {
+        let color = ColorSettings {
+            linear_light: true,
+            ..ColorSettings::default()
+        };
+        let out = run_with(
+            &gray_image(64, 64, 128),
+            &Palette::black_white(),
+            true,
+            color,
+        );
+        // sRGB 128 is about 21.6% linear light.
+        let ratio = white_ratio(&out);
+        assert!((ratio - 0.216).abs() < 0.02, "ratio {ratio}");
     }
 
     #[test]
@@ -134,10 +168,10 @@ mod tests {
     #[test]
     fn cancellation_returns_none() {
         let kernel = BuiltinKernel::FloydSteinberg.kernel();
-        let palette = Palette::black_white();
+        let quantizer = Quantizer::new(&Palette::black_white(), ColorSettings::default());
         let params = DiffusionParams {
             kernel: &kernel,
-            palette: &palette,
+            quantizer: &quantizer,
             serpentine: false,
             strength: 1.0,
         };

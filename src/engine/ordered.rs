@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::Cancel;
-use super::palette::Palette;
+use super::palette::Quantizer;
 
 pub const MAX_MATRIX_SIZE: usize = 16;
 
@@ -195,7 +195,7 @@ impl OrderedPreset {
 
 pub struct OrderedParams<'a> {
     pub matrix: &'a Matrix,
-    pub palette: &'a Palette,
+    pub quantizer: &'a Quantizer,
     /// Multiplier on the estimated distance between palette steps.
     pub spread: f32,
 }
@@ -207,7 +207,7 @@ pub fn dither(src: &RgbaImage, params: &OrderedParams, cancelled: Cancel) -> Opt
     }
     let thresholds = params.matrix.thresholds();
     let (mw, mh) = (params.matrix.width, params.matrix.height);
-    dither_with(src, params.palette, params.spread, cancelled, |x, y| {
+    dither_with(src, params.quantizer, params.spread, cancelled, |x, y| {
         thresholds[(y % mh) * mw + x % mw]
     })
 }
@@ -215,16 +215,16 @@ pub fn dither(src: &RgbaImage, params: &OrderedParams, cancelled: Cancel) -> Opt
 /// Shared dithering core. `threshold(x, y)` returns a value in `-0.5..0.5` for each pixel.
 pub fn dither_with(
     src: &RgbaImage,
-    palette: &Palette,
+    q: &Quantizer,
     spread: f32,
     cancelled: Cancel,
     threshold: impl Fn(usize, usize) -> f32 + Sync,
 ) -> Option<RgbaImage> {
     let (w, h) = (src.width() as usize, src.height() as usize);
-    if palette.is_empty() || w == 0 || h == 0 {
+    if q.is_empty() || w == 0 || h == 0 {
         return Some(src.clone());
     }
-    let amplitude = spread * palette.step_estimate();
+    let amplitude = spread * q.step_estimate();
 
     let mut buf = src.as_raw().clone();
     buf.par_chunks_mut(w * 4)
@@ -236,12 +236,9 @@ pub fn dither_with(
             for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 // A low threshold lets a pixel turn light first, so it is subtracted.
                 let offset = threshold(x, y) * amplitude;
-                let value = [
-                    px[0] as f32 - offset,
-                    px[1] as f32 - offset,
-                    px[2] as f32 - offset,
-                ];
-                let c = palette.colors[palette.nearest(value)];
+                let working = q.to_working([px[0], px[1], px[2]]);
+                let value = working.map(|v| v - offset);
+                let c = q.colors[q.nearest(value)];
                 px[..3].copy_from_slice(&c);
             }
             Ok(())
@@ -254,6 +251,7 @@ pub fn dither_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::palette::{ColorSettings, Palette};
     use image::Rgba;
 
     fn gray_image(w: u32, h: u32, v: u8) -> RgbaImage {
@@ -261,9 +259,10 @@ mod tests {
     }
 
     fn run(img: &RgbaImage, matrix: &Matrix, palette: &Palette) -> RgbaImage {
+        let quantizer = Quantizer::new(palette, ColorSettings::default());
         let params = OrderedParams {
             matrix,
-            palette,
+            quantizer: &quantizer,
             spread: 1.0,
         };
         dither(img, &params, &|| false).unwrap()
@@ -344,10 +343,10 @@ mod tests {
     #[test]
     fn cancellation_returns_none() {
         let m = Matrix::bayer(2);
-        let p = Palette::black_white();
+        let q = Quantizer::new(&Palette::black_white(), ColorSettings::default());
         let params = OrderedParams {
             matrix: &m,
-            palette: &p,
+            quantizer: &q,
             spread: 1.0,
         };
         assert!(dither(&gray_image(4, 4, 10), &params, &|| true).is_none());
