@@ -16,7 +16,7 @@ use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
 use crate::ui::viewer::Viewer;
 use crate::ui::{kernel_editor, matrix_editor};
-use crate::worker::Worker;
+use crate::worker::{Worker, preview_factor};
 
 const PREVIEW_TEXTURE: TextureOptions = TextureOptions {
     magnification: egui::TextureFilter::Nearest,
@@ -39,6 +39,8 @@ pub struct RakeinenApp {
     worker: Worker,
     settings: Settings,
     submitted: Option<Settings>,
+    submitted_preview: bool,
+    result_is_preview: bool,
     pending: Option<u64>,
     kernel_choice: Option<BuiltinKernel>,
     matrix_choice: Option<OrderedPreset>,
@@ -61,6 +63,8 @@ impl RakeinenApp {
             worker: Worker::spawn(ctx),
             settings: Settings::default(),
             submitted: None,
+            submitted_preview: false,
+            result_is_preview: false,
             pending: None,
             kernel_choice: Some(BuiltinKernel::FloydSteinberg),
             matrix_choice: Some(OrderedPreset::Bayer8),
@@ -93,6 +97,8 @@ impl RakeinenApp {
                 });
                 self.result = None;
                 self.submitted = None;
+                self.submitted_preview = false;
+                self.result_is_preview = false;
                 self.pending = None;
                 self.worker.cancel();
                 self.viewer.request_fit();
@@ -143,12 +149,19 @@ impl RakeinenApp {
     fn sync_worker(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.source else { return };
 
-        if self.submitted.as_ref() != Some(&self.settings) {
-            let generation = self
-                .worker
-                .submit(source.pixels.clone(), self.settings.clone());
+        // While a pointer button is held (slider drags), large images get a fast reduced-quality
+        // preview, and one full-quality pass follows on release.
+        let dragging = ctx.input(|i| i.pointer.any_down());
+        let want_preview =
+            dragging && preview_factor(source.pixels.width(), source.pixels.height()) > 1;
+        let changed = self.submitted.as_ref() != Some(&self.settings);
+        if changed || (self.submitted_preview && !want_preview) {
+            let generation =
+                self.worker
+                    .submit(source.pixels.clone(), self.settings.clone(), want_preview);
             self.pending = Some(generation);
             self.submitted = Some(self.settings.clone());
+            self.submitted_preview = want_preview;
         }
 
         if let Some(output) = self.worker.poll() {
@@ -157,6 +170,7 @@ impl RakeinenApp {
                 Some(tex) => tex.set(image, PREVIEW_TEXTURE),
                 None => self.result = Some(ctx.load_texture("result", image, PREVIEW_TEXTURE)),
             }
+            self.result_is_preview = output.preview;
             if self.pending == Some(output.generation) {
                 self.pending = None;
             }
@@ -197,6 +211,8 @@ impl RakeinenApp {
                 ui.spinner();
                 ui.label("Dithering…");
             });
+        } else if self.result_is_preview {
+            ui.label("Preview quality while dragging");
         }
     }
 
