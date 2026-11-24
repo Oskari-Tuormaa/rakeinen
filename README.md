@@ -14,7 +14,7 @@ A desktop app for dithering images, with a live preview that updates as you twea
 - **Palettes.** Edit colors by hand, pick a preset (black & white, grayscale, Game Boy, CGA, EGA, PICO-8), import or export `.hex` and `.gpl` files, or extract a palette from the image (after preprocessing) using k-means in Oklab, with a Variety control for how much large flat areas count.
 - **Color handling.** Choose RGB or Oklab for finding the closest palette color, and optionally dither in linear light.
 - **Preprocessing.** Pixel size (downscaling), brightness, contrast, gamma, grayscale and invert.
-- **Viewer.** Pan and zoom, a Fit button (or double-click), a 1:1 button for one image pixel per screen pixel, and a view selector to switch between the original, the preprocessed image (before dithering) and the dithered result.
+- **Viewer.** Pan and zoom, a Fit button (or double-click), a 1:1 button for one image pixel per screen pixel, and a view selector to switch between the original, the preprocessed image snapped to the palette without dithering (which redraws as you edit the palette), and the dithered result.
 - **Export.** Save the result as PNG with an optional integer upscale (up to ×32). "Match source size" scales a pixel-size result back to the original dimensions. Exporting always renders the whole image, in the background.
 
 ## Running

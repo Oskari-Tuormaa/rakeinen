@@ -143,6 +143,14 @@ pub fn preprocessed(src: &RgbaImage, settings: &Settings) -> RgbaImage {
     preprocess_region(src, &settings.preprocess, Region::full(w, h))
 }
 
+/// `src` after preprocessing with every pixel snapped to its nearest palette color, without any
+/// dithering. Returns `None` if `cancelled` becomes true mid-run.
+pub fn quantized(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Option<RgbaImage> {
+    let prepared = preprocessed(src, settings);
+    let quantizer = Quantizer::new(&settings.palette, settings.color);
+    ordered::dither_with(&prepared, &quantizer, 0.0, cancelled, |_, _| 0.0)
+}
+
 /// Preprocesses and dithers all of `src`. Returns `None` if `cancelled` becomes true mid-run.
 pub fn process(src: &RgbaImage, settings: &Settings, cancelled: Cancel) -> Option<RgbaImage> {
     let (w, h) = processed_size(src, settings);
@@ -361,6 +369,46 @@ mod tests {
                 "serpentine {serpentine}"
             );
         }
+    }
+
+    #[test]
+    fn quantized_snaps_every_pixel_to_its_nearest_palette_color() {
+        let src = gradient(64, 48);
+        let s = Settings {
+            palette: palette::Palette::new(vec![[0, 0, 0], [255, 0, 0], [255, 255, 255]]),
+            ..Settings::default()
+        };
+        let out = quantized(&src, &s, &|| false).unwrap();
+        assert_eq!((out.width(), out.height()), (64, 48));
+        let q = Quantizer::new(&s.palette, s.color);
+        for (a, b) in src.pixels().zip(out.pixels()) {
+            let nearest = q.colors[q.nearest(q.to_working([a[0], a[1], a[2]]))];
+            assert_eq!([b[0], b[1], b[2]], nearest);
+            assert_eq!(b[3], a[3]);
+        }
+    }
+
+    #[test]
+    fn quantized_follows_the_palette_and_the_preprocessing() {
+        let src = RgbaImage::from_pixel(8, 8, Rgba([200, 200, 200, 255]));
+        let mut s = Settings::default();
+        assert!(
+            quantized(&src, &s, &|| false)
+                .unwrap()
+                .pixels()
+                .all(|p| p[0] == 255)
+        );
+        s.preprocess.invert = true;
+        assert!(
+            quantized(&src, &s, &|| false)
+                .unwrap()
+                .pixels()
+                .all(|p| p[0] == 0)
+        );
+        s.preprocess.invert = false;
+        s.palette = palette::Palette::new(vec![[10, 20, 30], [250, 0, 0]]);
+        let out = quantized(&src, &s, &|| false).unwrap();
+        assert!(out.pixels().all(|p| [p[0], p[1], p[2]] == [250, 0, 0]));
     }
 
     #[test]

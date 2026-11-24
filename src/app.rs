@@ -11,7 +11,7 @@ use crate::engine;
 use crate::engine::kernels::{BuiltinKernel, Kernel};
 use crate::engine::noise::NoiseKind;
 use crate::engine::ordered::{Matrix, OrderedPreset};
-use crate::engine::palette::{self, Metric, Palette};
+use crate::engine::palette::{self, ColorSettings, Metric, Palette};
 use crate::engine::preprocess::{PreprocessSettings, output_size};
 use crate::engine::{MethodKind, Region, Settings};
 use crate::export;
@@ -37,25 +37,39 @@ const REGION_PADDING: f32 = 8.0;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Original,
-    Preprocessed,
+    Quantized,
     Dithered,
 }
 
 impl ViewMode {
-    const ALL: [ViewMode; 3] = [Self::Original, Self::Preprocessed, Self::Dithered];
+    const ALL: [ViewMode; 3] = [Self::Original, Self::Quantized, Self::Dithered];
 
     fn label(self) -> &'static str {
         match self {
             Self::Original => "Original",
-            Self::Preprocessed => "Preprocessed",
+            Self::Quantized => "Quantized",
             Self::Dithered => "Dithered",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Original => "The image as loaded",
+            Self::Quantized => {
+                "Preprocessed, with every pixel snapped to its nearest palette color and no dithering"
+            }
+            Self::Dithered => "The dithered result",
         }
     }
 }
 
 /// What the newest worker job was computed from, to tell whether it is out of date.
 enum JobKey {
-    Preprocessed(PreprocessSettings),
+    Quantized {
+        preprocess: PreprocessSettings,
+        palette: Palette,
+        color: ColorSettings,
+    },
     Dithered(Settings),
 }
 
@@ -90,8 +104,8 @@ pub struct RakeinenApp {
     result: Option<ResultLayer>,
     /// Just the visible part, shown on top of `result` while dragging a setting.
     region_result: Option<ResultLayer>,
-    /// The image after preprocessing, before dithering.
-    prepared: Option<ResultLayer>,
+    /// The preprocessed image snapped to the palette, before dithering.
+    quantized: Option<ResultLayer>,
     viewer: Viewer,
     error: Option<String>,
     worker: Worker,
@@ -160,7 +174,7 @@ impl RakeinenApp {
             source: None,
             result: None,
             region_result: None,
-            prepared: None,
+            quantized: None,
             viewer: Viewer::default(),
             error: None,
             worker: Worker::spawn(ctx),
@@ -204,7 +218,7 @@ impl RakeinenApp {
                 });
                 self.result = None;
                 self.region_result = None;
-                self.prepared = None;
+                self.quantized = None;
                 self.status = None;
                 self.submitted = None;
                 self.submitted_partial = false;
@@ -383,7 +397,18 @@ impl RakeinenApp {
     /// Whether the newest worker job already reflects the current settings for `stage`.
     fn job_is_current(&self, stage: Stage) -> bool {
         match (&self.submitted, stage) {
-            (Some(JobKey::Preprocessed(p)), Stage::Preprocessed) => *p == self.settings.preprocess,
+            (
+                Some(JobKey::Quantized {
+                    preprocess,
+                    palette,
+                    color,
+                }),
+                Stage::Quantized,
+            ) => {
+                *preprocess == self.settings.preprocess
+                    && *palette == self.settings.palette
+                    && *color == self.settings.color
+            }
             (Some(JobKey::Dithered(s)), Stage::Dithered) => *s == self.settings,
             _ => false,
         }
@@ -395,7 +420,7 @@ impl RakeinenApp {
         // The original needs no work, and the other views only compute what they show.
         let stage = match self.view_mode {
             ViewMode::Original => None,
-            ViewMode::Preprocessed => Some(Stage::Preprocessed),
+            ViewMode::Quantized => Some(Stage::Quantized),
             ViewMode::Dithered => Some(Stage::Dithered),
         };
         if let Some(stage) = stage {
@@ -413,7 +438,11 @@ impl RakeinenApp {
                         .submit(source.pixels.clone(), self.settings.clone(), stage, region);
                 self.pending = Some(generation);
                 self.submitted = Some(match stage {
-                    Stage::Preprocessed => JobKey::Preprocessed(self.settings.preprocess.clone()),
+                    Stage::Quantized => JobKey::Quantized {
+                        preprocess: self.settings.preprocess.clone(),
+                        palette: self.settings.palette.clone(),
+                        color: self.settings.color,
+                    },
                     Stage::Dithered => JobKey::Dithered(self.settings.clone()),
                 });
                 self.submitted_partial = region.is_some();
@@ -422,8 +451,8 @@ impl RakeinenApp {
 
         if let Some(output) = self.worker.poll() {
             match (output.stage, output.full) {
-                (Stage::Preprocessed, _) => {
-                    update_layer(ctx, &mut self.prepared, "prepared", &output);
+                (Stage::Quantized, _) => {
+                    update_layer(ctx, &mut self.quantized, "quantized", &output);
                 }
                 (Stage::Dithered, true) => {
                     update_layer(ctx, &mut self.result, "result", &output);
@@ -739,7 +768,8 @@ impl eframe::App for RakeinenApp {
                 ui.separator();
                 ui.add_enabled_ui(self.source.is_some(), |ui| {
                     for mode in ViewMode::ALL {
-                        ui.selectable_value(&mut self.view_mode, mode, mode.label());
+                        ui.selectable_value(&mut self.view_mode, mode, mode.label())
+                            .on_hover_text(mode.description());
                     }
                 });
                 ui.separator();
@@ -784,7 +814,7 @@ impl eframe::App for RakeinenApp {
                 let mut layers = Vec::new();
                 let shown: Vec<&ResultLayer> = match self.view_mode {
                     ViewMode::Original => Vec::new(),
-                    ViewMode::Preprocessed => self.prepared.iter().collect(),
+                    ViewMode::Quantized => self.quantized.iter().collect(),
                     ViewMode::Dithered => [&self.result, &self.region_result]
                         .into_iter()
                         .flatten()
