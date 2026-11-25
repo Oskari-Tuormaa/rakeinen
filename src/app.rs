@@ -17,7 +17,7 @@ use crate::engine::{MethodKind, Region, Settings};
 use crate::export;
 use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
-use crate::ui::viewer::{Layer, Viewer};
+use crate::ui::viewer::{Layer, Pane, Viewer};
 use crate::ui::{kernel_editor, matrix_editor};
 use crate::worker::{Output, Stage, Worker};
 
@@ -60,6 +60,70 @@ impl ViewMode {
             }
             Self::Dithered => "The dithered result",
         }
+    }
+}
+
+/// How many views are shown side by side.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewLayout {
+    Single,
+    /// Two views of your choice, separated by a draggable divider.
+    Split2,
+    /// Original, quantized and dithered, separated by two draggable dividers.
+    Split3,
+}
+
+impl ViewLayout {
+    const ALL: [ViewLayout; 3] = [Self::Single, Self::Split2, Self::Split3];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Single => "Single",
+            Self::Split2 => "Split 2",
+            Self::Split3 => "Split 3",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Single => "Show one view",
+            Self::Split2 => "Compare two views, with a draggable divider",
+            Self::Split3 => "Compare the original, quantized and dithered views",
+        }
+    }
+}
+
+/// The textures that can fill a pane.
+struct Results<'a> {
+    source: &'a TextureHandle,
+    quantized: Option<&'a ResultLayer>,
+    dithered: Option<&'a ResultLayer>,
+    /// Only the visible part of the dithered image, drawn over `dithered`.
+    region: Option<&'a ResultLayer>,
+}
+
+impl<'a> Results<'a> {
+    /// The layers that draw `mode`, falling back to the original while a result is missing.
+    fn layers(&self, mode: ViewMode) -> Vec<Layer<'a>> {
+        let ready: Vec<&ResultLayer> = match mode {
+            ViewMode::Original => Vec::new(),
+            ViewMode::Quantized => self.quantized.into_iter().collect(),
+            ViewMode::Dithered => [self.dithered, self.region].into_iter().flatten().collect(),
+        };
+        if ready.is_empty() {
+            let size = self.source.size_vec2();
+            return vec![Layer {
+                texture: self.source,
+                rect: Rect::from_min_size(Pos2::ZERO, size),
+            }];
+        }
+        ready
+            .into_iter()
+            .map(|layer| Layer {
+                texture: &layer.texture,
+                rect: layer.image_rect(),
+            })
+            .collect()
     }
 }
 
@@ -124,7 +188,11 @@ pub struct RakeinenApp {
     /// Receives the outcome of a PNG export running on a background thread.
     export_job: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     status: Option<String>,
+    layout: ViewLayout,
+    /// The view shown by `ViewLayout::Single`.
     view_mode: ViewMode,
+    /// The left and right views of `ViewLayout::Split2`.
+    split_pair: [ViewMode; 2],
 }
 
 /// The worker stages needed to draw `modes`, in pipeline order.
@@ -205,7 +273,9 @@ impl RakeinenApp {
             export_scale: 1,
             export_job: None,
             status: None,
+            layout: ViewLayout::Single,
             view_mode: ViewMode::Dithered,
+            split_pair: [ViewMode::Original, ViewMode::Dithered],
         }
     }
 
@@ -413,7 +483,11 @@ impl RakeinenApp {
 
     /// The views currently on screen, left to right.
     fn shown_modes(&self) -> Vec<ViewMode> {
-        vec![self.view_mode]
+        match self.layout {
+            ViewLayout::Single => vec![self.view_mode],
+            ViewLayout::Split2 => self.split_pair.to_vec(),
+            ViewLayout::Split3 => ViewMode::ALL.to_vec(),
+        }
     }
 
     /// The worker stages needed to draw the current views, in pipeline order.
@@ -796,9 +870,33 @@ impl eframe::App for RakeinenApp {
                 });
                 ui.separator();
                 ui.add_enabled_ui(self.source.is_some(), |ui| {
-                    for mode in ViewMode::ALL {
-                        ui.selectable_value(&mut self.view_mode, mode, mode.label())
-                            .on_hover_text(mode.description());
+                    for layout in ViewLayout::ALL {
+                        ui.selectable_value(&mut self.layout, layout, layout.label())
+                            .on_hover_text(layout.description());
+                    }
+                    ui.separator();
+                    match self.layout {
+                        ViewLayout::Single => {
+                            for mode in ViewMode::ALL {
+                                ui.selectable_value(&mut self.view_mode, mode, mode.label())
+                                    .on_hover_text(mode.description());
+                            }
+                        }
+                        ViewLayout::Split2 => {
+                            for (side, mode) in self.split_pair.iter_mut().enumerate() {
+                                egui::ComboBox::from_id_salt(("split_pane", side))
+                                    .selected_text(mode.label())
+                                    .show_ui(ui, |ui| {
+                                        for choice in ViewMode::ALL {
+                                            ui.selectable_value(mode, choice, choice.label())
+                                                .on_hover_text(choice.description());
+                                        }
+                                    });
+                            }
+                        }
+                        ViewLayout::Split3 => {
+                            ui.label("Original | Quantized | Dithered");
+                        }
                     }
                 });
                 ui.separator();
@@ -840,28 +938,21 @@ impl eframe::App for RakeinenApp {
         egui::CentralPanel::default().show(ui, |ui| match &self.source {
             Some(src) => {
                 let image_size = src.texture.size_vec2();
-                let mut layers = Vec::new();
-                let shown: Vec<&ResultLayer> = match self.view_mode {
-                    ViewMode::Original => Vec::new(),
-                    ViewMode::Quantized => self.quantized.iter().collect(),
-                    ViewMode::Dithered => [&self.result, &self.region_result]
-                        .into_iter()
-                        .flatten()
-                        .collect(),
+                let results = Results {
+                    source: &src.texture,
+                    quantized: self.quantized.as_ref(),
+                    dithered: self.result.as_ref(),
+                    region: self.region_result.as_ref(),
                 };
-                if shown.is_empty() {
-                    layers.push(Layer {
-                        texture: &src.texture,
-                        rect: Rect::from_min_size(Pos2::ZERO, image_size),
-                    });
-                }
-                for layer in shown {
-                    layers.push(Layer {
-                        texture: &layer.texture,
-                        rect: layer.image_rect(),
-                    });
-                }
-                self.viewer.show(ui, image_size, &layers);
+                let panes: Vec<Pane> = self
+                    .shown_modes()
+                    .into_iter()
+                    .map(|mode| Pane {
+                        label: mode.label(),
+                        layers: results.layers(mode),
+                    })
+                    .collect();
+                self.viewer.show(ui, image_size, &panes);
             }
             None => {
                 ui.centered_and_justified(|ui| {
@@ -878,6 +969,77 @@ mod tests {
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
+    }
+
+    fn layer_texture(ctx: &egui::Context, name: &str, size: [usize; 2]) -> TextureHandle {
+        let image = ColorImage::filled(size, egui::Color32::WHITE);
+        ctx.load_texture(name, image, TextureOptions::NEAREST)
+    }
+
+    fn result_layer(
+        ctx: &egui::Context,
+        name: &str,
+        region: Region,
+        pixel_size: u32,
+    ) -> ResultLayer {
+        ResultLayer {
+            texture: layer_texture(ctx, name, [region.w as usize, region.h as usize]),
+            region,
+            pixel_size,
+        }
+    }
+
+    #[test]
+    fn panes_fall_back_to_the_original_until_their_result_arrives() {
+        let ctx = egui::Context::default();
+        let source = layer_texture(&ctx, "source", [40, 20]);
+        let results = Results {
+            source: &source,
+            quantized: None,
+            dithered: None,
+            region: None,
+        };
+        for mode in ViewMode::ALL {
+            let layers = results.layers(mode);
+            assert_eq!(layers.len(), 1, "{}", mode.label());
+            assert_eq!(
+                layers[0].rect,
+                Rect::from_min_size(Pos2::ZERO, vec2(40.0, 20.0))
+            );
+        }
+    }
+
+    #[test]
+    fn panes_draw_their_own_results_in_image_coordinates() {
+        let ctx = egui::Context::default();
+        let source = layer_texture(&ctx, "source", [40, 20]);
+        let quantized = result_layer(&ctx, "q", Region::full(20, 10), 2);
+        let dithered = result_layer(&ctx, "d", Region::full(20, 10), 2);
+        let part = Region {
+            x: 4,
+            y: 2,
+            w: 6,
+            h: 3,
+        };
+        let region = result_layer(&ctx, "r", part, 2);
+        let results = Results {
+            source: &source,
+            quantized: Some(&quantized),
+            dithered: Some(&dithered),
+            region: Some(&region),
+        };
+
+        assert_eq!(results.layers(ViewMode::Quantized).len(), 1);
+        let layers = results.layers(ViewMode::Dithered);
+        assert_eq!(layers.len(), 2);
+        assert_eq!(
+            layers[0].rect,
+            Rect::from_min_size(Pos2::ZERO, vec2(40.0, 20.0))
+        );
+        assert_eq!(
+            layers[1].rect,
+            Rect::from_min_size(pos2(8.0, 4.0), vec2(12.0, 6.0))
+        );
     }
 
     #[test]
