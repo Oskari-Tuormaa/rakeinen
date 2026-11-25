@@ -252,15 +252,16 @@ fn to_color_image(img: &RgbaImage) -> ColorImage {
 }
 
 impl RakeinenApp {
-    pub fn new(ctx: egui::Context) -> Self {
-        Self {
+    /// Starts with `initial` opened, if given.
+    pub fn new(ctx: egui::Context, initial: Option<PathBuf>) -> Self {
+        let mut app = Self {
             source: None,
             result: None,
             region_result: None,
             quantized: None,
             viewer: Viewer::default(),
             error: None,
-            worker: Worker::spawn(ctx),
+            worker: Worker::spawn(ctx.clone()),
             settings: Settings::default(),
             submitted_quantized: None,
             submitted_dithered: None,
@@ -278,7 +279,11 @@ impl RakeinenApp {
             layout: ViewLayout::Single,
             view_mode: ViewMode::Dithered,
             split_pair: [ViewMode::Original, ViewMode::Dithered],
+        };
+        if let Some(path) = initial {
+            app.load(&ctx, &path);
         }
+        app
     }
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -1130,6 +1135,36 @@ mod tests {
             layers[1].rect,
             Rect::from_min_size(pos2(8.0, 4.0), vec2(12.0, 6.0))
         );
+    }
+
+    #[test]
+    fn starts_with_the_image_given_on_the_command_line() {
+        let path = std::env::temp_dir().join(format!("rakeinen-open-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(6, 4, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+
+        let app = RakeinenApp::new(egui::Context::default(), Some(path.clone()));
+        std::fs::remove_file(&path).ok();
+
+        let source = app.source.expect("the image should be loaded");
+        assert_eq!(source.texture.size(), [6, 4]);
+        assert_eq!(source.name, path.file_name().unwrap().to_string_lossy());
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn a_missing_file_on_the_command_line_shows_an_error() {
+        let missing = std::env::temp_dir().join("rakeinen-does-not-exist.png");
+        let app = RakeinenApp::new(egui::Context::default(), Some(missing));
+        assert!(app.source.is_none());
+        assert!(app.error.is_some_and(|e| e.contains("Failed to open")));
+    }
+
+    #[test]
+    fn starts_empty_without_arguments() {
+        let app = RakeinenApp::new(egui::Context::default(), None);
+        assert!(app.source.is_none() && app.error.is_none());
     }
 
     #[test]
