@@ -17,6 +17,8 @@
           wayland
           libxkbcommon
           libGL
+          # rfd loads libdbus at runtime to reach the file chooser portal; without it dialogs silently never open.
+          dbus
           libx11
           libxcursor
           libxi
