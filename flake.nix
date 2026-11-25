@@ -34,6 +34,13 @@
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = runtimeLibs pkgs;
 
+          postInstall = ''
+            install -Dm644 packaging/rakeinen.desktop $out/share/applications/rakeinen.desktop
+            install -Dm644 packaging/rakeinen.svg $out/share/icons/hicolor/scalable/apps/rakeinen.svg
+            substituteInPlace $out/share/applications/rakeinen.desktop \
+              --replace-fail "Exec=rakeinen" "Exec=$out/bin/rakeinen"
+          '';
+
           postFixup = ''
             patchelf --add-rpath ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)} $out/bin/rakeinen
           '';
@@ -68,6 +75,15 @@
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibs pkgs);
         };
+      });
+
+      checks = forAllSystems (pkgs: {
+        desktop-entry =
+          pkgs.runCommand "validate-desktop-entry" { nativeBuildInputs = [ pkgs.desktop-file-utils ]; }
+            ''
+              desktop-file-validate ${./packaging/rakeinen.desktop}
+              touch $out
+            '';
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);

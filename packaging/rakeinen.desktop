@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Rakeinen
+GenericName=Image Dithering
+Comment=Dither images with a live preview
+Exec=rakeinen %f
+Icon=rakeinen
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+MimeType=image/png;image/jpeg;image/webp;image/bmp;
+Keywords=dither;dithering;halftone;pixel;palette;image;
+StartupWMClass=rakeinen
