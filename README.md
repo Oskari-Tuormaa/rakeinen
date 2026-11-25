@@ -30,6 +30,30 @@ cargo run --release     # inside the dev shell
 
 If you use direnv, `.envrc` already contains `use flake .`.
 
+### Installing on NixOS
+
+The package installs the program, a desktop entry and an icon, so Rakeinen shows up in your application launcher and under "Open with" for PNG, JPEG, WebP and BMP files. It can also be started with an image: `rakeinen photo.png`.
+
+For a single user:
+
+```sh
+nix profile install .
+```
+
+System-wide, add the flake as an input and the package to your configuration:
+
+```nix
+# flake.nix
+inputs.rakeinen.url = "path:/home/you/repos/rakeinen"; # or a git URL
+
+# configuration.nix
+environment.systemPackages = [
+  inputs.rakeinen.packages.${pkgs.stdenv.hostPlatform.system}.default
+];
+```
+
+`nix flake check` validates the desktop entry.
+
 ## Using it
 
 1. Open an image with **Open…** or drop a file on the window. PNG, JPEG, WebP and BMP are supported.
@@ -68,6 +92,7 @@ src/
     kernel_editor.rs
     matrix_editor.rs
     palette_editor.rs
+packaging/            desktop entry and icon, installed by the Nix package
 ```
 
 The engine does not depend on the UI, so it can be tested on its own:
