@@ -16,6 +16,7 @@ A desktop app for dithering images, with a live preview that updates as you twea
 - **Preprocessing.** Pixel size (downscaling), brightness, contrast, gamma, grayscale and invert.
 - **Viewer.** Pan and zoom, a Fit button (or double-click), a 1:1 button for one image pixel per screen pixel, and a view selector to switch between the original, the preprocessed image snapped to the palette without dithering (which redraws as you edit the palette), and the dithered result. Split 2 and Split 3 layouts show several of these side by side, with draggable dividers. Split 3 shows all three at once, with the same pan and zoom, so you can compare them directly.
 - **Export.** Save the result as PNG with an optional integer upscale (up to ×32). "Match source size" scales a pixel-size result back to the original dimensions. Exporting always renders the whole image, in the background.
+- **Presets.** Save all settings (preprocessing, method and its kernel or matrix, palette and color options) to a JSON file and load them again. Settings missing from a file keep their defaults, and out-of-range values are clamped.
 
 ## Running
 
@@ -42,6 +43,7 @@ If you use direnv, `.envrc` already contains `use flake .`.
 |---|---|
 | Diffusion kernel | JSON: `{ "cols", "rows", "weights", "divisor" }`. Row 0 is the current scanline and the current pixel is in column `cols / 2`. |
 | Threshold matrix | JSON: `{ "width", "height", "values" }` |
+| Preset | JSON with `"format": "rakeinen-preset"`, a `"version"` and the `"settings"` |
 | Palette | `.hex` (one `RRGGBB` color per line) or GIMP `.gpl` |
 
 ## Project layout
@@ -52,6 +54,7 @@ src/
   app.rs             application state and the settings panel
   worker.rs          background dithering thread, with cancellation of stale jobs
   export.rs          full-image rendering, nearest-neighbour upscaling and PNG saving
+  preset.rs          saving and loading all settings as a JSON preset
   engine/
     mod.rs           settings and the processing pipeline
     preprocess.rs    resize and tone adjustments
@@ -72,7 +75,3 @@ The engine does not depend on the UI, so it can be tested on its own:
 ```sh
 cargo test
 ```
-
-## Not done yet
-
-- Saving and loading all settings as a preset.

@@ -179,6 +179,11 @@ impl OrderedPreset {
         }
     }
 
+    /// The preset that `matrix` is an unedited copy of, if any.
+    pub fn matching(matrix: &Matrix) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.matrix() == *matrix)
+    }
+
     pub fn matrix(self) -> Matrix {
         match self {
             Self::Bayer2 => Matrix::bayer(2),
@@ -330,6 +335,16 @@ mod tests {
         let m = Matrix::new(3, 2, vec![0, 2, 4, 5, 3, 1]);
         let out = run(&gray_image(10, 7, 100), &m, &Palette::black_white());
         assert!(out.pixels().all(|p| p[0] == 0 || p[0] == 255));
+    }
+
+    #[test]
+    fn matching_finds_unedited_presets_only() {
+        for preset in OrderedPreset::ALL {
+            assert_eq!(OrderedPreset::matching(&preset.matrix()), Some(preset));
+        }
+        let mut edited = OrderedPreset::Bayer4.matrix();
+        edited.values[0] = 99;
+        assert_eq!(OrderedPreset::matching(&edited), None);
     }
 
     #[test]

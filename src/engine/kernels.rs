@@ -144,6 +144,11 @@ impl BuiltinKernel {
         }
     }
 
+    /// The built-in kernel that `kernel` is an unedited copy of, if any.
+    pub fn matching(kernel: &Kernel) -> Option<Self> {
+        Self::ALL.into_iter().find(|b| b.kernel() == *kernel)
+    }
+
     pub fn kernel(self) -> Kernel {
         match self {
             Self::FloydSteinberg => Kernel::from_grid(16.0, &[&[0., 0., 7.], &[3., 5., 1.]]),
@@ -204,6 +209,16 @@ mod tests {
                 assert!((sum - 1.0).abs() < 1e-6, "{}: {sum}", k.name());
             }
         }
+    }
+
+    #[test]
+    fn matching_finds_unedited_built_ins_only() {
+        for k in BuiltinKernel::ALL {
+            assert_eq!(BuiltinKernel::matching(&k.kernel()), Some(k));
+        }
+        let mut edited = BuiltinKernel::Stucki.kernel();
+        edited.weights[3] += 1.0;
+        assert_eq!(BuiltinKernel::matching(&edited), None);
     }
 
     #[test]

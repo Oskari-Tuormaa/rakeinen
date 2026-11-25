@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use image::RgbaImage;
+use serde::{Deserialize, Serialize};
 
 use super::Cancel;
 use super::ordered::{Matrix, dither_with};
@@ -9,7 +10,7 @@ use super::palette::Quantizer;
 const BLUE_NOISE_SIZE: usize = 64;
 const BLUE_NOISE_SIGMA: f32 = 1.5;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NoiseKind {
     White,
     Blue,

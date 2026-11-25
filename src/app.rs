@@ -15,6 +15,7 @@ use crate::engine::palette::{self, ColorSettings, Metric, Palette};
 use crate::engine::preprocess::{PreprocessSettings, output_size};
 use crate::engine::{MethodKind, Region, Settings};
 use crate::export;
+use crate::preset;
 use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
 use crate::ui::viewer::{Layer, Pane, Viewer};
@@ -576,7 +577,45 @@ impl RakeinenApp {
         egui::ScrollArea::vertical().show(ui, |ui| self.settings_contents(ui));
     }
 
+    fn save_preset(&mut self) {
+        let result =
+            preset::to_json(&self.settings).and_then(|json| save_text(&json, "dither-preset.json"));
+        self.error = result.err().map(|e| format!("Failed to save preset: {e}"));
+    }
+
+    fn load_preset(&mut self) {
+        let Some(text) = load_text() else { return };
+        match text.and_then(|text| preset::from_json(&text)) {
+            Ok(settings) => {
+                self.kernel_choice = BuiltinKernel::matching(&settings.diffusion.kernel);
+                self.matrix_choice = OrderedPreset::matching(&settings.ordered.matrix);
+                self.settings = settings;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("Failed to load preset: {e}")),
+        }
+    }
+
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Settings");
+            if ui
+                .button("Save…")
+                .on_hover_text("Save all settings to a preset file")
+                .clicked()
+            {
+                self.save_preset();
+            }
+            if ui
+                .button("Load…")
+                .on_hover_text("Load all settings from a preset file")
+                .clicked()
+            {
+                self.load_preset();
+            }
+        });
+        ui.separator();
+
         self.preprocess_controls(ui);
 
         ui.separator();
@@ -850,7 +889,8 @@ impl RakeinenApp {
     }
 }
 
-fn save_json<T: Serialize>(value: &T, file_name: &str) -> Result<(), String> {
+/// Asks where to save and writes `text` there. Cancelling the dialog is not an error.
+fn save_text(text: &str, file_name: &str) -> Result<(), String> {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("JSON", &["json"])
         .set_file_name(file_name)
@@ -858,19 +898,24 @@ fn save_json<T: Serialize>(value: &T, file_name: &str) -> Result<(), String> {
     else {
         return Ok(());
     };
-    let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())
+    std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
-fn load_json<T: DeserializeOwned>() -> Option<Result<T, String>> {
+/// Asks for a JSON file and reads it. `None` means the dialog was cancelled.
+fn load_text() -> Option<Result<String, String>> {
     let path = rfd::FileDialog::new()
         .add_filter("JSON", &["json"])
         .pick_file()?;
-    Some(
-        std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string())),
-    )
+    Some(std::fs::read_to_string(path).map_err(|e| e.to_string()))
+}
+
+fn save_json<T: Serialize>(value: &T, file_name: &str) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    save_text(&json, file_name)
+}
+
+fn load_json<T: DeserializeOwned>() -> Option<Result<T, String>> {
+    Some(load_text()?.and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string())))
 }
 
 impl eframe::App for RakeinenApp {

@@ -2,10 +2,12 @@ use std::f32::consts::FRAC_PI_4;
 
 use image::RgbaImage;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use super::Region;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PreprocessSettings {
     /// Shrinks the image by this integer factor before dithering, giving chunky pixels.
     pub pixel_size: u32,

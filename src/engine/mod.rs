@@ -6,6 +6,7 @@ pub mod palette;
 pub mod preprocess;
 
 use image::{RgbaImage, imageops};
+use serde::{Deserialize, Serialize};
 
 use diffusion::{DiffusionParams, diffuse};
 use kernels::{BuiltinKernel, Kernel};
@@ -17,7 +18,7 @@ use preprocess::{PreprocessSettings, output_size, preprocess_region};
 /// Reports whether the running job has been superseded and should stop early.
 pub type Cancel<'a> = &'a (dyn Fn() -> bool + Sync);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum MethodKind {
     Diffusion,
     Ordered,
@@ -36,27 +37,28 @@ impl MethodKind {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DiffusionSettings {
     pub kernel: Kernel,
     pub serpentine: bool,
     pub strength: f32,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct OrderedSettings {
     pub matrix: Matrix,
     pub spread: f32,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct NoiseSettings {
     pub kind: NoiseKind,
     pub spread: f32,
     pub seed: u32,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub preprocess: PreprocessSettings,
     pub method: MethodKind,
@@ -65,6 +67,49 @@ pub struct Settings {
     pub noise: NoiseSettings,
     pub palette: Palette,
     pub color: ColorSettings,
+}
+
+impl Settings {
+    /// Checks settings read from a file, and clamps numbers to the ranges the controls allow.
+    pub fn sanitized(mut self) -> Result<Self, String> {
+        self.diffusion
+            .kernel
+            .validate()
+            .map_err(|e| format!("kernel: {e}"))?;
+        self.ordered
+            .matrix
+            .validate()
+            .map_err(|e| format!("matrix: {e}"))?;
+        if self.palette.colors.is_empty() || self.palette.colors.len() > palette::MAX_PALETTE_COLORS
+        {
+            return Err(format!(
+                "the palette needs 1 to {} colors",
+                palette::MAX_PALETTE_COLORS
+            ));
+        }
+
+        let numbers = [
+            self.preprocess.brightness,
+            self.preprocess.contrast,
+            self.preprocess.gamma,
+            self.diffusion.strength,
+            self.ordered.spread,
+            self.noise.spread,
+        ];
+        if numbers.iter().any(|n| !n.is_finite()) {
+            return Err("a setting is not a finite number".into());
+        }
+
+        let pre = &mut self.preprocess;
+        pre.pixel_size = pre.pixel_size.clamp(1, 32);
+        pre.brightness = pre.brightness.clamp(-1.0, 1.0);
+        pre.contrast = pre.contrast.clamp(-1.0, 1.0);
+        pre.gamma = pre.gamma.clamp(0.2, 3.0);
+        self.diffusion.strength = self.diffusion.strength.clamp(0.0, 1.5);
+        self.ordered.spread = self.ordered.spread.clamp(0.0, 2.0);
+        self.noise.spread = self.noise.spread.clamp(0.0, 2.0);
+        Ok(self)
+    }
 }
 
 impl Default for Settings {

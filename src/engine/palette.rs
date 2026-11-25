@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use image::RgbaImage;
+use serde::{Deserialize, Serialize};
 
 pub const MAX_PALETTE_COLORS: usize = 256;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Palette {
     pub colors: Vec<[u8; 3]>,
 }
@@ -329,7 +330,7 @@ pub fn presets() -> Vec<(&'static str, Palette)> {
 }
 
 /// How "closest palette color" is measured.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Metric {
     /// Euclidean distance on the working-space channel values.
     Rgb,
@@ -348,7 +349,8 @@ impl Metric {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ColorSettings {
     /// Do the dithering arithmetic on linear light instead of gamma-encoded sRGB values.
     pub linear_light: bool,
