@@ -7,7 +7,7 @@ use image::RgbaImage;
 
 use crate::engine::{self, Region, Settings};
 
-/// How far through the pipeline a job should go.
+/// How far through the pipeline a result goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
     /// Preprocessed and snapped to the nearest palette color, without dithering.
@@ -30,7 +30,7 @@ pub struct Output {
 
 struct Job {
     generation: u64,
-    stage: Stage,
+    stages: Vec<Stage>,
     source: Arc<RgbaImage>,
     settings: Settings,
     region: Option<Region>,
@@ -57,33 +57,39 @@ impl Worker {
                     job = next;
                 }
                 let is_stale = || latest_for_thread.load(Ordering::Relaxed) != job.generation;
-                if is_stale() {
-                    continue;
-                }
                 let (w, h) = engine::processed_size(&job.source, &job.settings);
-                let (region, processed) = match job.stage {
-                    Stage::Quantized => (
-                        Region::full(w, h),
-                        engine::quantized(&job.source, &job.settings, &is_stale),
-                    ),
-                    Stage::Dithered => {
-                        let region = job.region.map_or(Region::full(w, h), |r| r.clamped(w, h));
-                        let processed =
-                            engine::process_region(&job.source, &job.settings, region, &is_stale);
-                        (region, processed)
+
+                for &stage in &job.stages {
+                    if is_stale() {
+                        break;
                     }
-                };
-                if let Some(image) = processed {
+                    let (region, processed) = match stage {
+                        Stage::Quantized => (
+                            Region::full(w, h),
+                            engine::quantized(&job.source, &job.settings, &is_stale),
+                        ),
+                        Stage::Dithered => {
+                            let region = job.region.map_or(Region::full(w, h), |r| r.clamped(w, h));
+                            let processed = engine::process_region(
+                                &job.source,
+                                &job.settings,
+                                region,
+                                &is_stale,
+                            );
+                            (region, processed)
+                        }
+                    };
+                    let Some(image) = processed else { break };
                     let output = Output {
                         generation: job.generation,
-                        stage: job.stage,
+                        stage,
                         image,
                         region,
                         full: region.covers(w, h),
                         pixel_size: job.settings.preprocess.pixel_size.max(1),
                     };
                     if result_tx.send(output).is_err() {
-                        break;
+                        return;
                     }
                     ctx.request_repaint();
                 }
@@ -98,20 +104,21 @@ impl Worker {
         }
     }
 
-    /// Queues a job and returns its generation, superseding any earlier job. With a `region`,
-    /// only that part of the dithered image is computed; it is ignored for the quantized stage.
+    /// Queues a job and returns its generation, superseding any earlier job. The `stages` are
+    /// computed in the given order and each sends its own result. With a `region`, only that
+    /// part of the dithered image is computed; the quantized stage ignores it.
     pub fn submit(
         &mut self,
         source: Arc<RgbaImage>,
         settings: Settings,
-        stage: Stage,
+        stages: Vec<Stage>,
         region: Option<Region>,
     ) -> u64 {
         self.generation += 1;
         self.latest.store(self.generation, Ordering::Relaxed);
         let _ = self.jobs.send(Job {
             generation: self.generation,
-            stage,
+            stages,
             source,
             settings,
             region,
@@ -125,13 +132,9 @@ impl Worker {
         self.latest.store(self.generation, Ordering::Relaxed);
     }
 
-    /// The newest finished result, if any arrived since the last call.
-    pub fn poll(&self) -> Option<Output> {
-        let mut newest = None;
-        while let Ok(output) = self.results.try_recv() {
-            newest = Some(output);
-        }
-        newest
+    /// Every result that arrived since the last call, oldest first.
+    pub fn poll(&self) -> Vec<Output> {
+        self.results.try_iter().collect()
     }
 }
 
@@ -143,21 +146,26 @@ mod tests {
 
     use super::*;
 
-    fn run(stage: Stage, region: Option<Region>) -> Output {
+    fn run(stages: Vec<Stage>, region: Option<Region>) -> Vec<Output> {
         let mut worker = Worker::spawn(egui::Context::default());
         let source = Arc::new(RgbaImage::from_pixel(32, 32, Rgba([140, 140, 140, 255])));
-        worker.submit(source, Settings::default(), stage, region);
+        let wanted = stages.len();
+        worker.submit(source, Settings::default(), stages, region);
         let started = Instant::now();
-        loop {
-            if let Some(output) = worker.poll() {
-                return output;
-            }
+        let mut outputs = Vec::new();
+        while outputs.len() < wanted {
+            outputs.extend(worker.poll());
             assert!(
                 started.elapsed() < Duration::from_secs(10),
                 "worker timed out"
             );
             thread::sleep(Duration::from_millis(5));
         }
+        outputs
+    }
+
+    fn run_one(stage: Stage, region: Option<Region>) -> Output {
+        run(vec![stage], region).remove(0)
     }
 
     fn distinct_colors(img: &RgbaImage) -> usize {
@@ -167,9 +175,16 @@ mod tests {
         colors.len()
     }
 
+    const REGION: Region = Region {
+        x: 4,
+        y: 4,
+        w: 8,
+        h: 8,
+    };
+
     #[test]
     fn quantized_stage_snaps_without_dithering() {
-        let output = run(Stage::Quantized, None);
+        let output = run_one(Stage::Quantized, None);
         assert_eq!(output.stage, Stage::Quantized);
         assert!(output.full);
         // Flat mid-gray snaps to one palette color, where dithering would mix two.
@@ -178,35 +193,34 @@ mod tests {
 
     #[test]
     fn dithered_stage_mixes_palette_colors() {
-        let output = run(Stage::Dithered, None);
+        let output = run_one(Stage::Dithered, None);
         assert_eq!(output.stage, Stage::Dithered);
         assert_eq!(distinct_colors(&output.image), 2);
     }
 
     #[test]
     fn quantized_stage_ignores_the_region() {
-        let region = Region {
-            x: 4,
-            y: 4,
-            w: 8,
-            h: 8,
-        };
-        let output = run(Stage::Quantized, Some(region));
+        let output = run_one(Stage::Quantized, Some(REGION));
         assert!(output.full);
         assert_eq!((output.image.width(), output.image.height()), (32, 32));
     }
 
     #[test]
     fn dithered_stage_honours_the_region() {
-        let region = Region {
-            x: 4,
-            y: 4,
-            w: 8,
-            h: 8,
-        };
-        let output = run(Stage::Dithered, Some(region));
+        let output = run_one(Stage::Dithered, Some(REGION));
         assert!(!output.full);
-        assert_eq!(output.region, region);
+        assert_eq!(output.region, REGION);
         assert_eq!((output.image.width(), output.image.height()), (8, 8));
+    }
+
+    #[test]
+    fn one_job_can_produce_several_stages_in_order() {
+        let outputs = run(vec![Stage::Quantized, Stage::Dithered], Some(REGION));
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].stage, Stage::Quantized);
+        assert!(outputs[0].full);
+        assert_eq!(outputs[1].stage, Stage::Dithered);
+        assert!(!outputs[1].full);
+        assert_eq!(outputs[0].generation, outputs[1].generation);
     }
 }

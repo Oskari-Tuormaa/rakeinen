@@ -63,14 +63,11 @@ impl ViewMode {
     }
 }
 
-/// What the newest worker job was computed from, to tell whether it is out of date.
-enum JobKey {
-    Quantized {
-        preprocess: PreprocessSettings,
-        palette: Palette,
-        color: ColorSettings,
-    },
-    Dithered(Settings),
+/// What a quantized result was computed from, to tell whether it is out of date.
+struct QuantizeKey {
+    preprocess: PreprocessSettings,
+    palette: Palette,
+    color: ColorSettings,
 }
 
 /// A dithered texture and where it belongs in the image.
@@ -110,10 +107,14 @@ pub struct RakeinenApp {
     error: Option<String>,
     worker: Worker,
     settings: Settings,
-    submitted: Option<JobKey>,
+    /// What the newest worker job computed each stage from; `None` if it skipped that stage.
+    submitted_quantized: Option<QuantizeKey>,
+    submitted_dithered: Option<Settings>,
     /// Whether the newest job covers only part of the image, so a full pass is still owed.
     submitted_partial: bool,
     pending: Option<u64>,
+    /// Stages the pending job has not delivered yet.
+    awaiting: Vec<Stage>,
     kernel_choice: Option<BuiltinKernel>,
     matrix_choice: Option<OrderedPreset>,
     extract_count: usize,
@@ -124,6 +125,18 @@ pub struct RakeinenApp {
     export_job: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     status: Option<String>,
     view_mode: ViewMode,
+}
+
+/// The worker stages needed to draw `modes`, in pipeline order.
+fn stages_for(modes: &[ViewMode]) -> Vec<Stage> {
+    [
+        (ViewMode::Quantized, Stage::Quantized),
+        (ViewMode::Dithered, Stage::Dithered),
+    ]
+    .into_iter()
+    .filter(|(mode, _)| modes.contains(mode))
+    .map(|(_, stage)| stage)
+    .collect()
 }
 
 /// The processed-image region covering `visible` (in original-image pixels) plus some padding.
@@ -179,9 +192,11 @@ impl RakeinenApp {
             error: None,
             worker: Worker::spawn(ctx),
             settings: Settings::default(),
-            submitted: None,
+            submitted_quantized: None,
+            submitted_dithered: None,
             submitted_partial: false,
             pending: None,
+            awaiting: Vec::new(),
             kernel_choice: Some(BuiltinKernel::FloydSteinberg),
             matrix_choice: Some(OrderedPreset::Bayer8),
             extract_count: 8,
@@ -220,9 +235,11 @@ impl RakeinenApp {
                 self.region_result = None;
                 self.quantized = None;
                 self.status = None;
-                self.submitted = None;
+                self.submitted_quantized = None;
+                self.submitted_dithered = None;
                 self.submitted_partial = false;
                 self.pending = None;
+                self.awaiting.clear();
                 self.worker.cancel();
                 self.viewer.request_fit();
                 self.error = None;
@@ -394,62 +411,71 @@ impl RakeinenApp {
         (region.area() * 10 < total * 7).then_some(region)
     }
 
+    /// The views currently on screen, left to right.
+    fn shown_modes(&self) -> Vec<ViewMode> {
+        vec![self.view_mode]
+    }
+
+    /// The worker stages needed to draw the current views, in pipeline order.
+    fn wanted_stages(&self) -> Vec<Stage> {
+        stages_for(&self.shown_modes())
+    }
+
+    fn quantize_key(&self) -> QuantizeKey {
+        QuantizeKey {
+            preprocess: self.settings.preprocess.clone(),
+            palette: self.settings.palette.clone(),
+            color: self.settings.color,
+        }
+    }
+
     /// Whether the newest worker job already reflects the current settings for `stage`.
-    fn job_is_current(&self, stage: Stage) -> bool {
-        match (&self.submitted, stage) {
-            (
-                Some(JobKey::Quantized {
-                    preprocess,
-                    palette,
-                    color,
-                }),
-                Stage::Quantized,
-            ) => {
-                *preprocess == self.settings.preprocess
-                    && *palette == self.settings.palette
-                    && *color == self.settings.color
-            }
-            (Some(JobKey::Dithered(s)), Stage::Dithered) => *s == self.settings,
-            _ => false,
+    fn is_current(&self, stage: Stage) -> bool {
+        match stage {
+            Stage::Quantized => self.submitted_quantized.as_ref().is_some_and(|key| {
+                key.preprocess == self.settings.preprocess
+                    && key.palette == self.settings.palette
+                    && key.color == self.settings.color
+            }),
+            Stage::Dithered => self.submitted_dithered.as_ref() == Some(&self.settings),
         }
     }
 
     fn sync_worker(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.source else { return };
 
-        // The original needs no work, and the other views only compute what they show.
-        let stage = match self.view_mode {
-            ViewMode::Original => None,
-            ViewMode::Quantized => Some(Stage::Quantized),
-            ViewMode::Dithered => Some(Stage::Dithered),
-        };
-        if let Some(stage) = stage {
+        // Only the stages on screen are computed. The original needs no work.
+        let stages = self.wanted_stages();
+        if !stages.is_empty() {
+            let want_dithered = stages.contains(&Stage::Dithered);
             // While a pointer button is held (slider drags), large images only get the visible
             // area dithered, and one full pass follows on release.
             let dragging = ctx.input(|i| i.pointer.any_down());
-            let region = if dragging && stage == Stage::Dithered {
+            let region = if dragging && want_dithered {
                 self.drag_region()
             } else {
                 None
             };
-            if !self.job_is_current(stage) || (self.submitted_partial && region.is_none()) {
-                let generation =
-                    self.worker
-                        .submit(source.pixels.clone(), self.settings.clone(), stage, region);
+            let stale = stages.iter().any(|&stage| !self.is_current(stage));
+            if stale || (self.submitted_partial && region.is_none()) {
+                // A new job cancels the previous one, so it always covers every wanted stage.
+                let generation = self.worker.submit(
+                    source.pixels.clone(),
+                    self.settings.clone(),
+                    stages.clone(),
+                    region,
+                );
                 self.pending = Some(generation);
-                self.submitted = Some(match stage {
-                    Stage::Quantized => JobKey::Quantized {
-                        preprocess: self.settings.preprocess.clone(),
-                        palette: self.settings.palette.clone(),
-                        color: self.settings.color,
-                    },
-                    Stage::Dithered => JobKey::Dithered(self.settings.clone()),
-                });
-                self.submitted_partial = region.is_some();
+                self.submitted_quantized = stages
+                    .contains(&Stage::Quantized)
+                    .then(|| self.quantize_key());
+                self.submitted_dithered = want_dithered.then(|| self.settings.clone());
+                self.submitted_partial = want_dithered && region.is_some();
+                self.awaiting = stages;
             }
         }
 
-        if let Some(output) = self.worker.poll() {
+        for output in self.worker.poll() {
             match (output.stage, output.full) {
                 (Stage::Quantized, _) => {
                     update_layer(ctx, &mut self.quantized, "quantized", &output);
@@ -463,7 +489,10 @@ impl RakeinenApp {
                 }
             }
             if self.pending == Some(output.generation) {
-                self.pending = None;
+                self.awaiting.retain(|&stage| stage != output.stage);
+                if self.awaiting.is_empty() {
+                    self.pending = None;
+                }
             }
         }
     }
@@ -849,6 +878,17 @@ mod tests {
 
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
+    }
+
+    #[test]
+    fn stages_follow_the_views_on_screen() {
+        assert_eq!(stages_for(&[ViewMode::Original]), vec![]);
+        assert_eq!(stages_for(&[ViewMode::Quantized]), vec![Stage::Quantized]);
+        assert_eq!(stages_for(&[ViewMode::Dithered]), vec![Stage::Dithered]);
+        assert_eq!(
+            stages_for(&[ViewMode::Dithered, ViewMode::Original, ViewMode::Quantized]),
+            vec![Stage::Quantized, Stage::Dithered]
+        );
     }
 
     #[test]
