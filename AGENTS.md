@@ -18,7 +18,10 @@ cargo clippy --all-targets # keep it warning-free
 cargo fmt
 nix build .#default        # packaged build, also checks the Nix side
 nix flake check            # validates the desktop entry
+nix fmt                    # formats flake.nix (nixfmt-rfc-style)
 ```
+
+The dev profile is built with `opt-level = 1` so the live preview stays usable in debug builds.
 
 `cargo run` opens a window on the user's screen. Do not launch the GUI without telling the user first. Check changes with build, clippy and tests, and say clearly what you could not verify visually.
 
@@ -59,6 +62,7 @@ packaging/         desktop entry and icon, installed by flake.nix
 - `eframe::App` has `fn ui(&mut self, ui, frame)`, not `update`. Panels and `CentralPanel` use `.show(ui, ...)`, and `Window` uses `.show(ctx, ...)`. `Ui::id` was renamed `scope_id`.
 - The renderer is glow, not wgpu. wgpu ignores texture `mipmap_mode`, which is why the backend was switched. `winit` is a direct dependency only to keep its default features (Wayland dlopen and window decorations), because `eframe` is built with `default-features = false`.
 - Scroll input is `smooth_scroll_delta`. A widget that handles the wheel should zero it so an enclosing scroll area does not also move (see `ui/wheel.rs`).
+- `rfd` (file dialogs) loads `libdbus-1.so.3` at runtime to reach the xdg portal, so `dbus` must stay in `runtimeLibs` in `flake.nix`. Without it dialogs silently never open (no error, `None` is returned as if cancelled).
 - Check an unfamiliar API in `~/.cargo/registry/src/*/egui-0.37.0/` before guessing.
 
 ## Conventions
