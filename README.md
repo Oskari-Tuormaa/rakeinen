@@ -34,6 +34,7 @@ If you use direnv, `.envrc` already contains `use flake .`.
 1. Open an image with **Open…** or drop a file on the window. PNG, JPEG, WebP and BMP are supported.
 2. Pick a method and tweak its settings in the left panel.
 3. Scroll to zoom, drag to pan, and use **Fit** or **1:1** to reset the view.
+   Hover over any drop-down and turn the mouse wheel to step through its options without opening it.
 
 ### File formats
 

@@ -18,6 +18,7 @@ use crate::export;
 use crate::ui::EditorAction;
 use crate::ui::palette_editor::{self, PaletteAction};
 use crate::ui::viewer::{Layer, Pane, Viewer};
+use crate::ui::wheel::wheel_select;
 use crate::ui::{kernel_editor, matrix_editor};
 use crate::worker::{Output, Stage, Worker};
 
@@ -580,13 +581,19 @@ impl RakeinenApp {
 
         ui.separator();
         ui.heading("Method");
-        egui::ComboBox::from_id_salt("method")
+        let combo = egui::ComboBox::from_id_salt("method")
             .selected_text(self.settings.method.name())
             .show_ui(ui, |ui| {
                 for method in MethodKind::ALL {
                     ui.selectable_value(&mut self.settings.method, method, method.name());
                 }
             });
+        let current = MethodKind::ALL
+            .iter()
+            .position(|&m| m == self.settings.method);
+        if let Some(i) = wheel_select(ui, &combo, current, MethodKind::ALL.len()) {
+            self.settings.method = MethodKind::ALL[i];
+        }
         ui.add_space(4.0);
 
         match self.settings.method {
@@ -611,7 +618,7 @@ impl RakeinenApp {
 
     fn diffusion_controls(&mut self, ui: &mut egui::Ui) {
         let kernel_label = self.kernel_choice.map_or("Custom", BuiltinKernel::name);
-        egui::ComboBox::from_label("Kernel")
+        let combo = egui::ComboBox::from_label("Kernel")
             .selected_text(kernel_label)
             .show_ui(ui, |ui| {
                 for builtin in BuiltinKernel::ALL {
@@ -622,6 +629,14 @@ impl RakeinenApp {
                     }
                 }
             });
+        let current = self
+            .kernel_choice
+            .and_then(|k| BuiltinKernel::ALL.iter().position(|&b| b == k));
+        if let Some(i) = wheel_select(ui, &combo, current, BuiltinKernel::ALL.len()) {
+            let builtin = BuiltinKernel::ALL[i];
+            self.kernel_choice = Some(builtin);
+            self.settings.diffusion.kernel = builtin.kernel();
+        }
 
         egui::CollapsingHeader::new("Kernel editor")
             .default_open(false)
@@ -643,7 +658,7 @@ impl RakeinenApp {
 
     fn ordered_controls(&mut self, ui: &mut egui::Ui) {
         let matrix_label = self.matrix_choice.map_or("Custom", OrderedPreset::name);
-        egui::ComboBox::from_label("Matrix")
+        let combo = egui::ComboBox::from_label("Matrix")
             .selected_text(matrix_label)
             .show_ui(ui, |ui| {
                 for preset in OrderedPreset::ALL {
@@ -654,6 +669,14 @@ impl RakeinenApp {
                     }
                 }
             });
+        let current = self
+            .matrix_choice
+            .and_then(|m| OrderedPreset::ALL.iter().position(|&p| p == m));
+        if let Some(i) = wheel_select(ui, &combo, current, OrderedPreset::ALL.len()) {
+            let preset = OrderedPreset::ALL[i];
+            self.matrix_choice = Some(preset);
+            self.settings.ordered.matrix = preset.matrix();
+        }
 
         egui::CollapsingHeader::new("Matrix editor")
             .default_open(false)
@@ -671,13 +694,17 @@ impl RakeinenApp {
 
     fn noise_controls(&mut self, ui: &mut egui::Ui) {
         let noise = &mut self.settings.noise;
-        egui::ComboBox::from_label("Noise")
+        let combo = egui::ComboBox::from_label("Noise")
             .selected_text(noise.kind.name())
             .show_ui(ui, |ui| {
                 for kind in NoiseKind::ALL {
                     ui.selectable_value(&mut noise.kind, kind, kind.name());
                 }
             });
+        let current = NoiseKind::ALL.iter().position(|&k| k == noise.kind);
+        if let Some(i) = wheel_select(ui, &combo, current, NoiseKind::ALL.len()) {
+            noise.kind = NoiseKind::ALL[i];
+        }
         ui.add(egui::Slider::new(&mut noise.spread, 0.0..=2.0).text("Spread"));
         if noise.kind == NoiseKind::White {
             ui.horizontal(|ui| {
@@ -719,16 +746,22 @@ impl RakeinenApp {
             .iter()
             .find(|(_, p)| *p == self.settings.palette)
             .map_or("Custom", |(name, _)| *name);
-        egui::ComboBox::from_label("Preset")
+        let combo = egui::ComboBox::from_label("Preset")
             .selected_text(current)
             .show_ui(ui, |ui| {
-                for (name, palette) in presets {
-                    let selected = palette == self.settings.palette;
-                    if ui.selectable_label(selected, name).clicked() {
-                        self.settings.palette = palette;
+                for (name, palette) in &presets {
+                    let selected = *palette == self.settings.palette;
+                    if ui.selectable_label(selected, *name).clicked() {
+                        self.settings.palette = palette.clone();
                     }
                 }
             });
+        let current = presets
+            .iter()
+            .position(|(_, p)| *p == self.settings.palette);
+        if let Some(i) = wheel_select(ui, &combo, current, presets.len()) {
+            self.settings.palette = presets[i].1.clone();
+        }
 
         let can_extract = self.source.is_some();
         let action = palette_editor::show(
@@ -756,13 +789,19 @@ impl RakeinenApp {
             "Dither in linear light",
         )
         .on_hover_text("Preserves overall brightness better, especially with few colors");
-        egui::ComboBox::from_label("Color distance")
+        let combo = egui::ComboBox::from_label("Color distance")
             .selected_text(self.settings.color.metric.name())
             .show_ui(ui, |ui| {
                 for metric in Metric::ALL {
                     ui.selectable_value(&mut self.settings.color.metric, metric, metric.name());
                 }
             });
+        let current = Metric::ALL
+            .iter()
+            .position(|&m| m == self.settings.color.metric);
+        if let Some(i) = wheel_select(ui, &combo, current, Metric::ALL.len()) {
+            self.settings.color.metric = Metric::ALL[i];
+        }
     }
 
     fn import_palette(&mut self) {
@@ -884,7 +923,7 @@ impl eframe::App for RakeinenApp {
                         }
                         ViewLayout::Split2 => {
                             for (side, mode) in self.split_pair.iter_mut().enumerate() {
-                                egui::ComboBox::from_id_salt(("split_pane", side))
+                                let combo = egui::ComboBox::from_id_salt(("split_pane", side))
                                     .selected_text(mode.label())
                                     .show_ui(ui, |ui| {
                                         for choice in ViewMode::ALL {
@@ -892,6 +931,12 @@ impl eframe::App for RakeinenApp {
                                                 .on_hover_text(choice.description());
                                         }
                                     });
+                                let current = ViewMode::ALL.iter().position(|&m| m == *mode);
+                                if let Some(i) =
+                                    wheel_select(ui, &combo, current, ViewMode::ALL.len())
+                                {
+                                    *mode = ViewMode::ALL[i];
+                                }
                             }
                         }
                         ViewLayout::Split3 => {
